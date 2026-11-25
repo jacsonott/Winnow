@@ -1167,7 +1167,7 @@ export function buildValueFilterPanel(container) {
   paint();
 }
 
-/* The tables the Layout pane can take a layout from, after the default
+/* The tables Save & copy layout can copy a layout from, after the default
    saved for this header set: every other table sharing a column with this
    one, the same header set first, then by how many columns they share. */
 const LAYOUT_SAME = 'Same columns';
@@ -1211,21 +1211,109 @@ function movedColumns(before, after) {
   return new Set(after.filter((n, i) => at[i] >= 0 && !kept.has(n)));
 }
 
-/* The table menu's layout section: where to take a layout from, the
-   columns as they would be after it with what changes marked, and one
-   button that applies it. The default for this header set and the other
-   tables are places in one list, so applying the default gets the same
-   preview copying another table's layout had in its own dialog (Copy
-   layout from another table…, which this replaced). Saving this table's
-   layout as that default sits on the left of the foot, the way Import a
-   folder keeps Save as profile… */
+/* What putting `order` and `layout` on the table on screen would change,
+   column by column: every column in its new place (grouped ones left out,
+   as the grid leaves them out), what it will be, and what changes. One
+   computation for the preview, its summary line and the side list's hint,
+   so the three cannot disagree. */
+export function layoutChanges(order, layout) {
+  const before = S.order.filter((n) => !S.groupByCols.includes(n));
+  const after = order.filter((n) => !S.groupByCols.includes(n));
+  const moved = movedColumns(before, after);
+  const counts = { hidden: 0, shown: 0, pinned: 0, unpinned: 0, moved: 0, width: 0 };
+  const cols = after.map((name, i) => {
+    const now = S.layout[name] || {};
+    const then = layout[name] || {};
+    const what = [];
+    if (!!now.hidden !== !!then.hidden) what.push(then.hidden ? 'hidden' : 'shown');
+    if (!!now.pinned !== !!then.pinned) what.push(then.pinned ? 'pinned' : 'unpinned');
+    if (moved.has(name)) what.push('moved');
+    if ((now.w || null) !== (then.w || null)) what.push('width');
+    for (const w of what) counts[w]++;
+    return { name, at: i, hidden: !!then.hidden, pinned: !!then.pinned, what };
+  });
+  return { cols, changed: cols.filter((c) => c.what.length).length, counts };
+}
+
+const ordinal = (n) => {
+  const t = n % 100;
+  return n + (t >= 11 && t <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th'));
+};
+
+/* How a change reads beside its column. Said as a change ("gets hidden"),
+   never as a state ("hidden"): the preview's All columns view shows what
+   each column will be in grey beside its name, and the same word in both
+   places is what made "hidden" mean two different things there. */
+function changeWords(c) {
+  return c.what.map((w) => ({
+    hidden: 'gets hidden', shown: 'gets shown', pinned: 'gets pinned', unpinned: 'gets unpinned',
+    moved: `moves to ${ordinal(c.at + 1)}`, width: 'width changes',
+  })[w]).join(' · ');
+}
+
+/* "8 hidden, 5 moved, 1 pinned", in a fixed order, for the summary line. */
+function changeCounts(counts) {
+  return [['hidden', 'hidden'], ['shown', 'shown'], ['moved', 'moved'], ['pinned', 'pinned'],
+    ['unpinned', 'unpinned'], ['width', 'resized']]
+    .filter(([k]) => counts[k]).map(([k, w]) => `${counts[k]} ${w}`).join(', ');
+}
+
+/* The Changes / All columns choice above the preview, kept while the app
+   is open: someone who wants the whole order wants it every time. */
+let layoutPreviewAll = false;
+
+/* The side list's line under Save & copy layout: where this table stands
+   against the default, which is what the old "Default saved" never said. */
+async function layoutHint() {
+  const found = await findDefaultLayout();
+  if (!found) return 'No default saved';
+  const { order, layout } = defaultLayoutResult(found);
+  return layoutChanges(order, layout).changed ? 'Differs from the default' : 'Matches the default';
+}
+
+/* The table menu's Save & copy layout section, in two parts that each
+   carry their own button, so the two directions can't be mistaken for
+   each other:
+
+   - The default for this header set: what it does, whether this table
+     matches it, and saving this table's layout as it. Its button used to
+     sit under the preview of ANOTHER layout, as "Save this layout as the
+     default", where "this layout" read as the one previewed.
+   - Copying a layout onto this table: from the default or another table
+     (one list, so the default gets the preview copying always had; Copy
+     layout from another table… was its own dialog until this replaced
+     it), what would change, and Apply to this table.
+
+   It was "Layout" under This table, beside Show, hide & order under
+   Columns: two names for the one thing, and the one called Layout was the
+   one that doesn't lay anything out by hand. */
 export function buildLayoutPanel(container) {
   const id = S.sourceId;
   const changed = () => container.dispatchEvent(new CustomEvent('tablemenu:changed', { bubbles: true }));
   const others = layoutSources();
+  const baseNames = baseColumns().map((c) => c.name);
+  const setName = nicknameFor(baseNames);
+  const these = `these ${baseNames.length} columns`;
+
+  // The default for these columns.
+  const dflt = el('div', 'tm-layout-block tm-layout-default');
+  dflt.append(el('div', 'tm-layout-head', `Default for ${setName || these}`));
+  dflt.append(el('p', 'tm-layout-note',
+    `New tables with ${these} open with it, in this case and any other. `
+    + 'A table that already has a layout of its own keeps it until you copy the default onto it below.'));
+  const stateRow = el('div', 'tm-layout-state-row');
+  const state = el('span', 'tm-layout-state');
+  const save = el('button', 'btn tm-layout-save', 'Save this table’s layout as the default');
+  save.title = 'Every table imported later with these columns opens with this table’s column order, visibility, widths, pins and formats';
+  stateRow.append(state, save);
+  dflt.append(stateRow);
+
+  // Copying a layout onto this table.
+  const copy = el('div', 'tm-layout-block tm-layout-copy');
+  copy.append(el('div', 'tm-layout-head', 'Copy a layout onto this table'));
   const from = el('select', 'tm-layout-from');
-  from.setAttribute('aria-label', 'Take the layout from');
-  const dfltOpt = new Option('The default for these columns — looking…', 'default');
+  from.setAttribute('aria-label', 'Copy the layout from');
+  const dfltOpt = new Option(`The default for ${setName || these} — looking…`, 'default');
   dfltOpt.disabled = true;
   from.append(dfltOpt);
   for (const group of [LAYOUT_SAME, LAYOUT_SOME]) {
@@ -1236,57 +1324,122 @@ export function buildLayoutPanel(container) {
     for (const e of members) og.append(new Option(`${e.label} — ${e.hint}`, e.key));
     from.append(og);
   }
-  container.append(tableMenuField('Take the layout from', from));
+  const fromRow = el('div', 'tm-layout-from-row');
+  fromRow.append(el('label', null, 'From'), from);
   const notes = el('ul', 'mb-notes');
-  container.append(notes);
-
-  const head = el('div', 'side-preview-title', 'Columns after applying');
+  const title = el('div', 'side-preview-title');
+  const summary = el('span', 'tm-layout-summary');
+  const view = tableMenuSeg([
+    ['changes', 'What changes', 'Only the columns applying would change'],
+    ['all', 'All columns', 'Every column, in the order applying would leave them'],
+  ], () => (layoutPreviewAll ? 'all' : 'changes'), (key) => {
+    layoutPreviewAll = key === 'all';
+    view.paint();
+    paintRows();
+  }, 'tm-layout-view');
+  title.append(summary, view.seg);
   const box = el('div', 'side-preview tm-layout-preview');
   const rows = el('div', 'side-preview-rows');
-  const foot = el('div', 'side-preview-foot');
-  box.append(rows, foot);
-  container.append(head, box);
-
+  box.append(rows);
   const acts = el('div', 'row-actions tm-foot-actions');
-  const save = el('button', 'btn ghost', 'Save this layout as the default');
-  save.title = 'Reuse this table’s column order and visibility for any table imported with the same headers';
-  save.onclick = async () => { await saveDefaultLayout(); picked = false; loadDefault(); changed(); };
-  const apply = el('button', 'btn primary', 'Apply layout');
+  const undoNote = el('span', 'tm-layout-undo', 'Undo comes up in the message after applying.');
+  const apply = el('button', 'btn primary', 'Apply to this table');
   apply.disabled = true;
-  acts.append(save, apply);
-  container.append(acts);
+  acts.append(undoNote, apply);
+  copy.append(fromRow, notes, title, box, acts);
+  container.append(dflt, copy);
 
   let found;          // the saved default once asked: an object, or null for none
   let result = null;  // { order, layout, message } for what is chosen
+  let diff = null;    // layoutChanges() of what is chosen
   const layouts = new Map();   // source id -> its saved layout, asked once
+
+  function paintState() {
+    if (found === undefined) { state.textContent = 'Looking for a saved default…'; save.disabled = true; return; }
+    save.disabled = false;
+    state.className = 'tm-layout-state';
+    if (!found) {
+      state.textContent = `No default is saved for ${these} yet.`;
+      save.textContent = 'Save this table’s layout as the default';
+      return;
+    }
+    const { order, layout } = defaultLayoutResult(found);
+    const d = layoutChanges(order, layout);
+    if (!d.changed) {
+      state.classList.add('ok');
+      state.textContent = 'This table matches the default.';
+      save.textContent = 'Save this table’s layout as the default';
+      save.disabled = true;
+      save.title = 'This table’s layout is already the default';
+    } else {
+      state.classList.add('differs');
+      state.textContent = `This table differs from the default in ${plural(d.changed, 'column')}.`;
+      save.textContent = 'Replace the default with this table’s layout';
+      save.title = 'Every table imported later with these columns opens with this table’s layout instead of the one saved now';
+    }
+  }
+
+  save.onclick = oneAtATime(save, async () => {
+    if (!(await saveDefaultLayout())) return;
+    picked = false;
+    loadDefault();
+    changed();
+  });
 
   function loadDefault() {
     findDefaultLayout().then((f) => {
       found = f;
       if (!box.isConnected) return;
-      const name = nicknameFor(baseColumns().map((c) => c.name));
       dfltOpt.disabled = !f;
       dfltOpt.textContent = f
-        ? `The default saved for ${name || 'these columns'}`
-        : `The default for ${name || 'these columns'} — none saved yet`;
+        ? `The default for ${setName || these}`
+        : `The default for ${setName || these} — none saved yet`;
       // The saved default is the first place to look, until the analyst
       // has picked another.
       if (f && !picked) from.value = 'default';
       else if (!f && from.value === 'default' && others.length) from.value = others[0].key;
+      paintState();
       preview();
-    }).catch(() => { found = null; if (box.isConnected) preview(); });
+    }).catch(() => { found = null; if (box.isConnected) { paintState(); preview(); } });
+  }
+
+  function paintRows() {
+    if (!diff) return;
+    const shown = layoutPreviewAll || !diff.changed ? diff.cols : diff.cols.filter((c) => c.what.length);
+    const list = el('div', 'copy-layout-cols');
+    for (const c of shown) {
+      const r = el('div', 'copy-layout-col' + (c.hidden ? ' hidden-col' : '') + (c.what.length ? ' tm-changed' : ''));
+      r.dataset.col = c.name;
+      r.append(el('span', 'copy-layout-name', c.name));
+      // What the column will be, in grey, only where it isn't also the
+      // change: an unchanged hidden column says "hidden", one that gets
+      // hidden says "gets hidden" and nothing else.
+      const states = [];
+      if (c.hidden && !c.what.includes('hidden')) states.push('hidden');
+      if (c.pinned && !c.what.includes('pinned')) states.push('pinned');
+      if (states.length) r.append(el('span', 'copy-layout-note', states.join(' · ')));
+      if (c.what.length) r.append(el('span', 'tm-change', changeWords(c)));
+      list.append(r);
+    }
+    if (!diff.changed) {
+      // An empty box under "Applying it changes nothing" says nothing; the
+      // columns it would leave (which are the ones on screen) say what the
+      // layout the analyst is looking at actually is.
+      rows.replaceChildren(el('p', 'fb-help tm-layout-same', 'Nothing changes: this table already has this layout.'), list);
+    } else rows.replaceChildren(list);
   }
 
   async function preview() {
     const key = from.value;
     result = null;
+    diff = null;
     apply.disabled = true;
     box.classList.add('stale');
     let order, layout, line, message;
     if (key === 'default' && found) {
       ({ order, layout } = defaultLayoutResult(found));
-      line = `Saved for every table imported with these ${baseColumns().length} headers. A table that already has a layout keeps it until one is applied here.`;
-      message = 'Applied the default layout for these columns';
+      line = null;   // the card above already says what the default is
+      message = 'Copied the default layout for these columns onto this table';
     } else if (key && key !== 'default') {
       const entry = others.find((e) => e.key === key);
       if (!layouts.has(entry.src.id)) {
@@ -1300,51 +1453,29 @@ export function buildLayoutPanel(container) {
       order = copied.order;
       layout = copiedColumns(nameMap(saved.columns), copied.shared);
       const own = order.length - copied.shared.size;
-      line = `The order, visibility and widths of ${entry.label}, for the ${copied.shared.size} columns the two share.`
-        + (own ? ` ${own} only this table has ${own === 1 ? 'stays beside the column it follows' : 'stay beside the columns they follow'}.` : '');
-      message = `Copied the layout of ${entry.label}`;
+      line = `The order, visibility and widths of ${entry.label}, for the ${plural(copied.shared.size, 'column')} the two share.`
+        + (own ? ` ${own === 1 ? 'The 1 column only this table has stays beside the column it follows'
+          : `The ${own} columns only this table has stay beside the columns they follow`}.` : '');
+      message = `Copied the layout of ${entry.label} onto this table`;
     } else {
-      notes.replaceChildren(el('li', null, 'Nothing to take a layout from yet: no default is saved for these columns, and no other table shares any of them.'));
+      notes.replaceChildren(el('li', null, 'Nothing to copy a layout from yet: no default is saved for these columns, and no other table shares any of them.'));
+      notes.hidden = false;
+      from.disabled = true;
+      summary.textContent = '';
       rows.replaceChildren();
-      foot.replaceChildren();
       box.classList.remove('stale');
       return;
     }
-    notes.replaceChildren(el('li', null, line));
-    // What applying would change, row by row, against the table now.
-    const before = S.order.filter((n) => !S.groupByCols.includes(n));
-    const after = order.filter((n) => !S.groupByCols.includes(n));
-    const moved = movedColumns(before, after);
-    const list = el('div', 'copy-layout-cols');
-    let changes = 0;
-    after.forEach((n) => {
-      const now = S.layout[n] || {};
-      const then = layout[n] || {};
-      const what = [];
-      if (!!now.hidden !== !!then.hidden) what.push(then.hidden ? 'hidden' : 'shown');
-      if (!!now.pinned !== !!then.pinned) what.push(then.pinned ? 'pinned' : 'unpinned');
-      if (moved.has(n)) what.push('moved');
-      if ((now.w || null) !== (then.w || null)) what.push('width');
-      const r = el('div', 'copy-layout-col' + (then.hidden ? ' hidden-col' : '') + (what.length ? ' tm-changed' : ''));
-      r.dataset.col = n;
-      r.append(el('span', 'copy-layout-name', n));
-      const notesFor = [];
-      if (then.hidden && !what.includes('hidden')) notesFor.push('hidden');
-      if (then.pinned && !what.includes('pinned')) notesFor.push('pinned');
-      if (notesFor.length) r.append(el('span', 'copy-layout-note', notesFor.join(' · ')));
-      if (what.length) r.append(el('span', 'tm-change', what.join(' · ')));
-      if (what.length) changes++;
-      list.append(r);
-    });
-    rows.replaceChildren(list);
-    const verdict = changes
-      ? `${changes} of ${after.length} columns change.`
-      : 'Nothing changes: this table already has this layout.';
-    const p = el('p', 'fb-help', verdict);
-    foot.replaceChildren(p);
+    notes.replaceChildren(...(line ? [el('li', null, line)] : []));
+    notes.hidden = !line;
+    diff = layoutChanges(order, layout);
+    summary.textContent = diff.changed
+      ? `Applying it changes ${diff.changed} of ${plural(diff.cols.length, 'column')}: ${changeCounts(diff.counts)}.`
+      : 'Applying it changes nothing.';
+    paintRows();
     box.classList.remove('stale');
     result = { order, layout, message };
-    apply.disabled = !changes;
+    apply.disabled = !diff.changed;
   }
 
   let picked = false;
@@ -1355,6 +1486,7 @@ export function buildLayoutPanel(container) {
     replaceLayout(result.order, result.layout, result.message);
   };
   if (others.length) from.value = others[0].key;
+  paintState();
   loadDefault();
 }
 
@@ -1500,7 +1632,7 @@ export function buildTableStripPanel(container) {
   tables.title = 'Every table in the case — indexes, row counts, dropping a table';
   tables.onclick = () => openTablesManager();
   const reset = el('button', 'btn ghost', 'Reset view');
-  reset.title = 'Back to the just-opened state: clear filters, search, tag filter and grouping, and restore the default sort. Column layout and the timeframe filter stay (Layout, taking the default for these columns, resets the layout).';
+  reset.title = 'Back to the just-opened state: clear filters, search, tag filter and grouping, and restore the default sort. Column layout and the timeframe filter stay (to put the default layout back, copy it onto the table in Save & copy layout).';
   reset.onclick = async () => {
     $('modal').hidden = true;
     const dt = S.columns.find((c) => c.type === 'datetime');
@@ -1554,9 +1686,8 @@ function nameHint() {
    lot to put up for closing or renaming a tab. */
 export const TABLE_MENU_SECTIONS = [
   { id: 'columns', group: 'Columns', title: 'Show, hide & order', hint: columnsHint, build: buildColumnsPanel },
+  { id: 'layout', group: 'Columns', title: 'Save & copy layout', build: buildLayoutPanel, asyncHint: layoutHint },
   { id: 'valueFilters', group: 'Columns', title: 'Value dropdowns', hint: valueFilterHint, build: buildValueFilterPanel },
-  { id: 'layout', group: 'This table', title: 'Layout', build: buildLayoutPanel,
-    asyncHint: async () => ((await findDefaultLayout()) ? 'Default saved' : 'No default saved') },
   { id: 'name', group: 'This table', title: 'Name & merge', hint: nameHint, build: buildNamePanel },
 ];
 

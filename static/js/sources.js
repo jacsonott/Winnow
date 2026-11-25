@@ -348,7 +348,7 @@ export function tableMenuItems(id) {
   const key = s.id === S.sourceId && S.activeTab === 'grid' ? ((S.keymap || {}).openTableMenu || [])[0] : null;
   items.push({
     label: 'Columns…',
-    title: 'The table menu: show, hide, pin and reorder columns, value filter dropdowns, layout defaults',
+    title: 'The table menu: show, hide, pin and reorder columns, save or copy a layout, value filter dropdowns',
     hint: key ? keyLabel(key) : '',
     onclick: () => openTableMenu(s.id),
   });

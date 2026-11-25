@@ -35,8 +35,8 @@ def test_the_side_list_is_walked_with_the_arrow_keys(page):
     assert _focused_section(page) == "columns"
     assert "shown" in _hint(page, "columns")
     page.keyboard.press("ArrowDown")
-    page.wait_for_selector('.table-menu-pane[data-section="valueFilters"]')
-    assert _focused_section(page) == "valueFilters"
+    page.wait_for_selector('.table-menu-pane[data-section="layout"]')
+    assert _focused_section(page) == "layout"
     page.keyboard.press("End")
     page.wait_for_selector('.table-menu-pane[data-section="name"]')
     page.keyboard.press("ArrowDown")
