@@ -210,5 +210,8 @@ export async function undoFilterChange() {
   repaintSearchChrome();
   const more = h.entries.length;
   toast(`Filter change undone: ${describe(entry)}${more ? ` (${more} more to undo)` : ''}`, 3000);
-  await rebuildView();
+  // A step, not typing: it lands on the row the analyst is on, as a tag
+  // chip or the value picker does, whichever way the step went. Kept
+  // scroll offsets name a different stretch of a view that grew or shrank.
+  await rebuildView({ keepScroll: false });
 }

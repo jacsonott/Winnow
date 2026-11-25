@@ -174,12 +174,27 @@ exactly those rows.
 Every timestamp operation writes the same shape: `YYYY-MM-DD HH:MM:SS`,
 with a six-digit fraction (`.ffffff`) when the source carries sub-second
 precision. That is what makes the column sort correctly as text, from an
-index, and line up with every other datetime column in the case. A column
+index, and line up with every other datetime column in the case. Rows in
+the same second sort by their fraction. A column
 the import already recognized as datetime (US-style `1/5/2024 1:22:01 PM`,
 for one) sorts chronologically without one; deriving it is still worth it
 for a very large table you sort often, since an ISO column sorts faster. How it is *displayed* is
 a separate choice: right-click the header to pick a display format, or set
 the default in [Settings](Settings-and-shortcuts.md).
+
+**Fractions of a second are shown.** When the column's values carry a
+fraction of a second, the default display format, `YYYY-MM-DD HH:MM:SS`,
+shows it: to the millisecond (`2025-11-25 19:46:40.087`) when no value
+goes past the millisecond, otherwise to the microsecond
+(`2025-11-25 19:46:40.087123`). A Unix epoch in milliseconds shows its
+milliseconds this way, rather than every row in a second showing that same
+second. A column whose values are all whole seconds is shown to the second,
+and so is a fraction of all zeros, such as the `.000000` FILETIME writes for
+a whole second. Every other display format is kept as it is: a case set to
+`MM/DD/YYYY HH:MM:SS` shows the column that way, and one set to
+`YYYY-MM-DD HH:MM:SS.mmm` shows milliseconds. To see the column to the
+second, pick `YYYY-MM-DD HH:MM:SS` from its header's right-click menu. The
+menu ticks the format the column is shown in.
 
 **Time zones.** Epoch-style values (Unix, FILETIME, WebKit, Mac, .NET) are
 UTC by definition. A value that carries its own offset (`Z`, `UTC`, `GMT`,
@@ -198,7 +213,7 @@ time is UTC and the sender's own zone is unknown, so it is kept as UTC and
 
 | Operation | Accepts | Example input → output |
 | --- | --- | --- |
-| **Unix epoch** | Seconds, milliseconds, microseconds or nanoseconds since 1970, with an optional fraction. **Unit**: `auto`, `s`, `ms`, `us`, `ns` | `1704461121` → `2024-01-05 13:25:21`<br>`1704461121000` → `2024-01-05 13:25:21.000000` |
+| **Unix epoch** | Seconds, milliseconds, microseconds or nanoseconds since 1970, with an optional fraction. Nanoseconds are kept to the microsecond, the finest the stored shape holds. **Unit**: `auto`, `s`, `ms`, `us`, `ns` | `1704461121` → `2024-01-05 13:25:21`<br>`1704461121087` → `2024-01-05 13:25:21.087000`<br>`1704461121.5` → `2024-01-05 13:25:21.500000` |
 | **Windows FILETIME** | 100-ns ticks since 1601: decimal, `0x` hex, or bare hex that contains a letter | `133489347210000000` → `2024-01-05 13:25:21.000000`<br>`0x01DA3FD5B5A3E000` → `2024-01-05 12:50:06.885068` |
 | **WebKit/Chrome epoch** | Microseconds since 1601 (Chromium History, Cookies, Downloads) | `13348934721000000` → `2024-01-05 13:25:21.000000` |
 | **BSD syslog (Mmm dd hh:mm:ss)** | Year-less syslog lines. **Year of first line** is required | `Dec 31 23:59:59 host sshd[2]: …` → `2023-12-31 23:59:59` |

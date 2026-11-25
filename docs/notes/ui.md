@@ -2482,6 +2482,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   the rows seeded are the ones the grid will show (recentring after a
   page-0 seed painted the target rows as placeholders for a round trip),
   and after the seq/source guards the cursor is re-pointed by identity.
+  **A rebuild that drops a filter never keeps the scroll**, whoever asked
+  for it: `runBuild` compares the spec it is about to build with the one
+  the view on screen was built from (`shownSpec`, the view cache's key),
+  and when `dropsNarrowing` says a column filter, the filter tree, a tag
+  in the tag filter, the timeframe or the search went away, `keepScroll`
+  is turned off. Analysts reported the grid "sometimes" jumping to the
+  top on clearing filters, and the sometimes was the control: Escape in a
+  header box, emptying it, a filter-bar chip's ✕, and the search box
+  emptied all rebuilt with the default `keepScroll: true` (built for
+  typing), so the old offset (usually 0 — a narrow filter's rows fit on
+  one screen) landed on another stretch of the grown view, with the
+  cursor left as a number naming a stranger, or re-pointed off screen
+  with the pane open (the arrow keys then jumped to it, since the cell
+  cursor cold-starts from `S.cursor`). It is in `runBuild` rather than in
+  each handler so a future way to remove a filter can't reintroduce it.
+  Removed, not edited: a box whose text changed still filters, and
+  typing keeps its offset. `z` (`undoFilterChange`) passes `keepScroll:
+  false` itself, since a step back can narrow as well as widen. Pinned by
+  `tests/ui/test_dropping_a_filter_keeps_row.py`, one case per gesture,
+  pane open and closed.
   Three rules. With `keepScroll: true` (header-box typing, a sort click)
   the viewport never moves, so the one thing that would notice a
   re-pointed cursor is an open detail pane (grid.js re-points it at
@@ -2497,10 +2517,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   number; a lookup that failed (a 409 from a view a newer rebuild already
   evicted, a dropped request — `rowPositionIn` returns `undefined`) is
   not that answer and leaves the cursor alone for the next rebuild to
-  resolve. A cursor whose page has left the cache can't be captured at all
-  (`cursorRowAnchor` is null): a `keepScroll: true` rebuild then touches
-  nothing, and a landing at the top clears it, since the number would
-  name a stranger there. `keepRow: false` is for a navigation
+  resolve. A cursor whose page has left the cache (`cursorRowAnchor` is
+  null — the cache keeps ten pages, so this is any big table the analyst
+  has scrolled around in, or a jump whose rows haven't landed) is named by
+  asking the OLD view for the key at its position (`anchorKeyAt`, one
+  `/api/view/keys`, awaited with the picks' lookup before the build is
+  posted, while that view still exists). Before that fallback, "Clear
+  filters" on a big table went to the top and cleared the cursor. Only if
+  that ask fails too is nothing captured: a `keepScroll: true` rebuild
+  then touches nothing, and a landing at the top clears the cursor, since
+  the number would name a stranger there. `keepRow: false` is for a navigation
   that means "the top of a fresh table" (a dashboard drill, `openSource`'s
   first build). The `/api/row_position` GET has its own catch: the chip
   handlers don't await the rebuild, so a 409 from a view a newer rebuild

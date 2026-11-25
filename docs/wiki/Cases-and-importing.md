@@ -556,9 +556,11 @@ job.
 Chromium browsers store times as microseconds since 1601. A column whose
 name contains `time`, `utc` or `date` and whose values look like that gets a
 button under its table, after *Convert to dates:*, already pressed. Pressed
-columns import as ISO 8601 UTC (`2024-05-01T13:07:00.123Z`), and a value
-that doesn't convert keeps its number; unpress a button to keep the raw
-number throughout.
+columns import as ISO 8601 UTC to the microsecond, as Chromium records them
+(`2024-05-01T13:07:00.123456Z`), and a value that doesn't convert keeps its
+number; unpress a button to keep the raw number throughout. Under the
+default display format the column shows its fraction of a second too, as a
+[converted timestamp](Derived-columns.md#timestamps) does.
 
 The database is opened read-only (see [Case files](#case-files) for WAL
 databases). BLOBs import as `<N bytes>`. Text that isn't valid UTF-8 gets
