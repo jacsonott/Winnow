@@ -449,6 +449,13 @@ export function openMergeBuilder(opts = {}) {
       const cn = el('td', 'cn', c.name);
       if (c.source_column) cn.append(el('span', 'mb-added', 'added'));
       else cn.append(el('span', 'mb-ty', c.type));
+      // A column derived in Winnow comes along like the file's own,
+      // empty in the tables that don't derive it.
+      if (c.derived) {
+        const d = el('span', 'mb-added', 'derived');
+        d.title = 'A derived column, made in Winnow rather than read from the file';
+        cn.append(d);
+      }
       if (c.dropped) cn.title = 'Left out: not every table has this column';
       tr.append(cn);
       for (const m of res.members) {

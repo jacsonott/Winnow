@@ -891,9 +891,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   the timeframe takes the member as having that column and reads NULL.
   `_ensure_purpose_index_building` builds under the member's own spelling
   (`_table_own_spelling`) and skips a member that lacks the column. A
-  derived column is the exception that still needs every member: one is
-  made on the merge by making it on each member, so `add_derived_column`
-  and the previews before it refuse an input only some members have.
+  derived column made on the merge is made on every member, reading
+  an input a member lacks as empty (`_input_ref`, docs/notes/derived.md);
+  one made on a single member shows on the merge under "Keep every
+  column", empty in the other members' rows, as a file column does.
 - Column types are **inferred from a 500-row sample and stored as metadata only**;
   every value is stored TEXT. Don't "fix" this by typing the columns — mixed-type
   forensic CSVs then silently coerce, and evidence fidelity matters more than

@@ -263,6 +263,16 @@ table has), re-derive on the merge and on a member, the "Show N unparsed
 rows" fragment on a member that lacks an input, a session carrying the
 inputs a table lacks (and still refusing one it does not vouch for), and
 the canonical-timestamp typing rule case by case.
+`test_merge_partial_derived.py` is the report that derived columns were
+missing from a merge: a column derived on only some of a merge's tables,
+with the FIRST member lacking it so nothing leans on members[0], run
+through the column list (both modes, the merge builder's preview, a
+column derived after the merge), cells, filters, a raw fragment, sort,
+timeframe and histogram, grouping in both view shapes, the value list,
+tagging, CSV export, the SQL pane, save-as-table, a derive on the merge
+chained off it, re-derive, rename and remove on the merge, the unparsed
+fragment (exact, and refused where it can't be), and that no index is
+built on a table without the column.
 `test_esxi_log_shapes.py` covers the esxi_logs plugin's parser one line
 shape at a time (ESXi 5.x to 8.x hostd, vmkernel, vobd, shell, rhttpproxy,
 Linux RFC 3164, RFC 3339 and RFC 5424), its iisread-style column rules (the

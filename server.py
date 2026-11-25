@@ -6073,6 +6073,10 @@ def api_derived_unparsed_filter(def_id: int, source_id: int | None = None):
         return {"sql": store().unparsed_where_fragment(def_id, source_id)}
     except KeyError as e:
         raise HTTPException(404, str(e))
+    except ValueError as e:
+        # On a merge whose tables don't all have the column: which table
+        # to open instead.
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/row_tags/undo")

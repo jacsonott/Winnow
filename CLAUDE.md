@@ -688,7 +688,12 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    table" on a merge can only mean the tables its rows live in, the
    hits come back keyed by member so "Open ↦" has a real table to
    filter, and the expansion is reported in the job's `scope` so the
-   pane says which tables answered.
+   pane says which tables answered. A **derived column only some
+   members have** is shown on the merge like a file column only some
+   have, but its **"Show N unparsed rows"** is refused when a member
+   without it has one of its inputs (`_check_unparsed_on_merge`): no
+   filter fragment can tell the merge's tables apart, so it names the
+   tables to open instead.
  **Saving a
    view as a table** (`save_view_as_source`) works on a merge — the copy
    resolves each row through its own member and `subset_rids` records
