@@ -9,7 +9,7 @@
 
 import { drawBars, drawHistogram, pickBar } from './charts.js';
 import { renderHead } from './columns.js';
-import { $, api, el, nameMap, post, toast } from './core.js';
+import { $, api, el, inTurn, nameMap, post, toast } from './core.js';
 import { WIDGET_RENDERS, WIDGET_SOURCES, WIDGET_TEMPLATES, bucketRange, columnsForTable, recipeSql, tableOf, templateById, widgetFrom } from './dashwidgets.js';
 import { currentSpec, renderAdvancedChips, updateSearchHint } from './filters.js';
 import { openImportModal } from './importer.js';
@@ -1253,7 +1253,14 @@ async function runWidget(w, body, opts = {}) {
   if (!opts.quiet) body.replaceChildren(el('div', 'note-status', 'Loading…'));
   const mine = () => gen === boardGen && S.dashboardId === opts.boardId;
   let data;
-  try { data = await post('/api/dashboard/widget/preview', req); }
+  // A board's widgets take turns (core.js inTurn): opened with nothing
+  // cached, every card asks at once, and in the browser's own queue they
+  // held up every other window's requests until the last one answered.
+  // One still waiting when its board is closed, swapped or reloaded is
+  // not asked at all; the next load runs whatever is still uncached.
+  try {
+    data = await inTurn(() => (gen === boardGen ? post('/api/dashboard/widget/preview', req) : null));
+  }
   catch (e) {
     // `quiet` means a good number is already on this card. Replacing 26 of
     // them with 26 identical grey error lines because the server blinked
@@ -1272,6 +1279,7 @@ async function runWidget(w, body, opts = {}) {
     noteEmpty(w, body.closest('.dash-card'), null, e);
     return { error: e };
   }
+  if (data === null) return { skipped: true };
   if (req.dashboard_id != null && w.id) failedRuns.delete(w.id);
   // The board may have been closed or swapped while this was in flight;
   // filing the answer would file it against another board's widget. No

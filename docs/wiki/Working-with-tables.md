@@ -35,7 +35,7 @@ With a tab or a sidebar row focused, the keyboard's menu key or `Shift+F10` open
 
 Any page tab can go in a window of its own: SQL, Timeline, Notes, Watchlist, a plugin's tab such as the Pivot, or a pinned dashboard. That puts the page beside the table it is about, rather than taking turns with it. Right-click the page's tab and pick **Open in its own window**, or click ⧉ on its row in the sidebar's **Pages**. With **Pages as a dropdown** on ([Settings](Settings-and-shortcuts.md#pages-as-a-dropdown)) there are no page tabs, so right-click the page in the **Pages ▾** list instead, or the **Pages ▾** button itself while that page is showing. If nothing opens, the browser blocked it: allow pop-ups for Winnow and try again. The same menu has **Close this tab** (**Unpin this board** on a dashboard), which does what ✕ on the page's sidebar row does.
 
-The new window shows that page and nothing else. Its bar names the page and the case, and **⇤ Back to main window** closes it and puts the page back as a tab. Closing the window with its own ✕ does the same.
+The new window shows that page and nothing else. Its bar names the page and the case, and **⇤ Back to main window** closes it and puts the page back as a tab. Closing the window with its own ✕ does the same. It opens straight away even while a dashboard or a long query is still running in the main window.
 
 While a page is in its own window:
 

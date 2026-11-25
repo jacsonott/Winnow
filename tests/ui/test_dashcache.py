@@ -14,6 +14,15 @@ card order, and Playwright delivers them to the handler in that order. So
 putting the live widget LAST makes "its request arrived and no other did"
 a fact rather than a timeout.
 
+A board that does have to run everything runs it a few widgets at a
+time (core.js inTurn). It used to ask for all of them at once, and a
+browser opens six connections to a server between all of Winnow's
+windows: on a large case the queries a board had queued held up
+everything else for as long as the board took, a page popped out into a
+window of its own included (30-60 s, as users reported it). Held
+previews make that countable too: with the first ones held, no more than
+TURN_SLOTS are ever out.
+
 Two of these are about what the board does when things go wrong rather
 than about what it saves. A board LEFT OPEN while the case changes under
 it has to say so without being reopened — the analyst watching an import
@@ -58,6 +67,9 @@ class _Previews:
         for r in self.held:
             r.continue_()
         self.held = []
+
+    def release_one(self):
+        self.held.pop(0).continue_()
 
 
 def _make_board(page, name, widgets):
@@ -352,3 +364,52 @@ def test_run_now_re_runs_one_widget_and_restamps_it(page, until):
     finally:
         prev.release()
         _drop_board(page, did)
+
+
+def test_a_board_with_nothing_cached_runs_its_widgets_a_few_at_a_time(page, until):
+    did = _make_board(page, "Turns board", [_widget(f"W{i}", f"SELECT {i} AS n") for i in range(8)])
+    prev = _Previews(page)
+    prev.hold = True
+    try:
+        slots = page.evaluate("() => __winnow.TURN_SLOTS")
+        assert slots < 8
+        _open(page, did)
+        until(page, lambda: len(prev.held) >= slots, f"the first {slots} widgets to go out")
+        # Nothing to wait FOR: the check is that the other five did not go out.
+        page.wait_for_timeout(500)
+        assert len(prev.bodies) == slots, f"{len(prev.bodies)} of 8 widgets went out at once"
+        # One coming back lets one more go.
+        prev.release_one()
+        until(page, lambda: len(prev.bodies) == slots + 1, "the next widget to go out")
+        prev.release()
+        page.wait_for_function(
+            "() => document.querySelectorAll('#dashGrid .dash-stat').length === 8", timeout=15_000)
+        assert len(prev.bodies) == 8
+    finally:
+        prev.release()
+        _drop_board(page, did)
+
+
+def test_widgets_still_waiting_when_another_board_opens_are_never_asked(page, until):
+    """Before turns, a board left half-run went on running all of its
+    queries, and the board opened next waited behind them."""
+    first = _make_board(page, "Turns left", [_widget(f"L{i}", f"SELECT {i} AS n") for i in range(8)])
+    second = _make_board(page, "Turns next", [_widget("N", "SELECT 99 AS n")])
+    prev = _Previews(page)
+    prev.hold = True
+    try:
+        slots = page.evaluate("() => __winnow.TURN_SLOTS")
+        _open(page, first)
+        until(page, lambda: len(prev.held) >= slots, f"the first {slots} widgets to go out")
+        _open(page, second)
+        prev.release()
+        page.wait_for_function(
+            "() => [...document.querySelectorAll('#dashGrid .dash-stat')].map(s => s.textContent).join() === '99'",
+            timeout=15_000)
+        asked = [b.get("dashboard_id") for b in prev.bodies]
+        assert asked.count(first) == slots, asked
+        assert asked.count(second) == 1, asked
+    finally:
+        prev.release()
+        _drop_board(page, first)
+        _drop_board(page, second)

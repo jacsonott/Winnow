@@ -333,15 +333,52 @@ def test_closing_the_main_window_closes_its_pop_outs(own_page):
                 page.close(run_before_unload=True)
 
 
-def test_shut_down_does_not_count_its_own_pop_outs(page, until):
+def test_shut_down_does_not_count_its_own_pop_outs(page):
     """"Shut down" warns when other windows are open, because their work
-    stops too. A pop-out is this window's own page, not someone else's."""
-    with popped_out(page):
-        # The server counts the pop-out (its presence stream is open)...
+    stops too. A pop-out is this window's own page, not someone else's —
+    and it holds no presence stream for the server to count (the next test
+    says why), so neither count has it."""
+    with popped_out(page) as pop:
+        assert pop.evaluate("() => __winnow.hearsMainPresence()")
         raw = "() => fetch(`/api/presence/others?page=${__winnow.PAGE_ID}`).then((r) => r.json()).then((d) => d.others)"
-        until(page, lambda: page.evaluate(raw) == 1, "the server to see the pop-out")
-        # ...and the warning doesn't.
+        assert page.evaluate(raw) == 0
         assert page.evaluate("() => __winnow.otherWindows()") == 0
+
+
+# A query that runs until it is cancelled, as the SQL pane's Stop does.
+ENDLESS = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT COUNT(*) FROM c"
+
+
+def test_a_pop_out_loads_while_the_main_window_holds_the_connections(page, server_post, until):
+    """Users waited 30-60 s for a popped-out page to appear on a large
+    case. A browser opens six connections to one server, shared by every
+    window, and the pop-out queued behind whatever the main window had
+    out: a board's widgets, a long query. With the main window's presence
+    stream and four long requests out, the pop-out's own presence stream
+    took the sixth connection, and nothing it needed to boot could go
+    anywhere until one of the four ended. It holds no stream now, so the
+    one connection left is its to load through.
+
+    The four are SQL runs that never end on their own, so the pop-out
+    cannot have waited them out: each one is still running when it has
+    loaded (cancel_op finds it), and they are stopped from outside the
+    browser, which has no connection to spare for it."""
+    tokens = [f"popout-held-{i}" for i in range(4)]
+    sent = []
+    page.on("request", lambda r: sent.append(r.url) if "/api/sql/run" in r.url else None)
+    try:
+        for t in tokens:
+            page.evaluate("""([sql, token]) => { fetch('/api/sql/run', { method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Timeline-Lite-Client': '1' },
+                body: JSON.stringify({ sql, op_token: token }) }).catch(() => {}); }""", [ENDLESS, t])
+        until(page, lambda: len(sent) == len(tokens), "the four runs to go out")
+        with popped_out(page) as pop:
+            assert pop.locator("#timelineview").is_visible()
+            still_running = [server_post("/api/cancel_op", {"token": t})["cancelled"] for t in tokens]
+            assert all(still_running), still_running
+    finally:
+        for t in tokens:
+            server_post("/api/cancel_op", {"token": t})
 
 
 # ------------------------------------------------------------ the Pivot

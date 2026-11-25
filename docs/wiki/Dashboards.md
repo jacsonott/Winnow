@@ -104,6 +104,12 @@ number has to be current the moment the board appears, such as a watchlist
 or tag count. The editor shows how long the widget took on its last run,
 and the preview's **ran in** how long the draft takes, to help you decide.
 
+Widgets run three at a time, counting every Winnow window, and the rest
+wait their turn. On a large case a board that runs everything fills in a
+few cards at a time, and the table, tagging and pages opened in their own
+windows keep answering meanwhile instead of waiting for the whole board.
+Opening another board stops the old one's waiting widgets from running.
+
 ## Adding widgets
 
 ### The widget editor
