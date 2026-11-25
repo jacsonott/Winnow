@@ -49,6 +49,17 @@ timeframe, histogram, the `dmy_datetime` derived op, and that tsformat.js's
 formats. `tests/ui/test_timestamp_dmy_ui.py` is its browser half: the grid's
 first row, `parseTimestamp` against `_ts_normalize`, and the case set to
 DD-MM-YYYY HH:MM:SS.
+`test_derived_subsecond.py` holds what a converted timestamp column says
+about its fraction of a second (`subsecond`): epochs in each unit, a
+seconds column with a fraction on some rows, FILETIME's `.000000`, a text
+op (none), a re-derive, a merge of a seconds member and a milliseconds
+one, the open-time pass over a case from before the column existed, a
+copy to another case, and the SQLite import's Chrome-time conversion
+keeping its microseconds. `tests/ui/test_epoch_subsecond_ui.py` is the
+symptom: a millisecond epoch converted under the default format shows
+`.087` in the grid (it showed `…:40`), the header menu ticks the widened
+format and picking the plain one wins, and a format the case chose
+(US, milliseconds, As stored) is shown as chosen.
 `test_number_columns.py` holds each shape of "imported numbers sort as
 text" to a number column that sorts by value, through the reader it came
 in by: a "-" or "N/A" among the numbers, a column empty for the first 500
@@ -263,6 +274,21 @@ table has), re-derive on the merge and on a member, the "Show N unparsed
 rows" fragment on a member that lacks an input, a session carrying the
 inputs a table lacks (and still refusing one it does not vouch for), and
 the canonical-timestamp typing rule case by case.
+`test_derived_coalesce_timestamps.py` is the report that followed it:
+the two timestamp columns showed alike in the grid but stored their times
+in different shapes, and the coalesce came out text with both shapes as
+stored. A merge of three shapes (EvtxECmd's, ISO with a Z, US with a
+12-hour clock, whose 2023 stamp sorts last as text) sorted, filtered and
+charted by time; the merge preview judging each table on its own inputs;
+one table's two shapes, an offset applied; a value that isn't a time
+passed over and a row with none counted; a text input keeping the copy; a
+Parse-a-timestamp column counting as datetime; a re-derive rewriting an
+old text column; the plain merge of same-named columns in two shapes,
+which was always datetime; and `canonical_timestamp` shape by shape,
+including what it refuses. `tests/ui/test_coalesce_timestamp_shapes_ui.py`
+asserts the symptom in the grid: each row of the coalesced column shows
+the text its own table's column shows, and sorting by it puts the US row
+between the two ISO ones.
 `test_merge_partial_derived.py` is the report that derived columns were
 missing from a merge: a column derived on only some of a merge's tables,
 with the FIRST member lacking it so nothing leans on members[0], run
@@ -486,6 +512,17 @@ search works or not.
   busy (`python3 -c "while True: pass" &`, one per core), which turned
   a rare CI failure into roughly one run in eight, and record what each
   build and landing did in a `window` array to read back on failure.
+
+- **Shrink only the fuse a test is about.** A server spawned with
+  `WINNOW_NEVER_CONNECTED_EXIT_S` cut to seconds starts spending it when
+  the module loads, before the test can reach the port; on a Windows
+  runner, startup plus `spawn_server`'s readiness probe (a refused
+  connect there takes about a second to fail) ran past 3s, and
+  test_idle_shutdown.py's dropped-stream test exited as "no browser ever
+  connected" before its stream opened. The tests that connect now leave
+  that fuse long and only the two about it shorten it. Reproduce this
+  kind of failure by delaying startup and the probe rather than by
+  waiting for a slow runner.
 
 - **Two imports queued together finish in either order**, so the tables'
   ids come out in either order too. A test that compares sorted pairs of

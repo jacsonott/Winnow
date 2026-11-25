@@ -17,7 +17,16 @@ from __future__ import annotations
 import json
 import re
 
-from .timeparse import register_op
+from .timeparse import canonical_timestamp, register_op
+
+
+def _all_timestamps(state: dict) -> bool:
+    """Whether every listed column the table has is a datetime column.
+    `input_types` is each input's type on the table being derived (None
+    for one it lacks, which a merge's member reads as empty), set by the
+    store beside `inputs`."""
+    held = [t for t in state.get("input_types") or () if t is not None]
+    return bool(held) and all(t == "datetime" for t in held)
 
 
 def _coalesce(values: list, params: dict, state: dict) -> str | None:
@@ -25,7 +34,23 @@ def _coalesce(values: list, params: dict, state: dict) -> str | None:
     the analyst listed the columns. Returned untrimmed: the derived column
     is a copy of what the source held, not a tidied version of it. All
     empty is NULL — not a parse failure (those count non-empty inputs that
-    produced nothing), just a row no column had the fact for."""
+    produced nothing), just a row no column had the fact for.
+
+    Timestamps are the exception. When every column is a datetime column
+    the answer is the first value that reads as a time, written canonical
+    (timeparse.canonical_timestamp), so the column is a datetime column
+    (Store._infer_derived_type) whatever shape each one stores its times
+    in: an ISO stamp with a Z in one table and a US date in the other look
+    alike in the grid, and a copy of each put both shapes, as stored, in a
+    text column. A value that doesn't read as a time is passed over like a
+    blank one; a row with something in it and no time anywhere is NULL,
+    and counted as unparsed, as a timestamp parse's would be."""
+    if _all_timestamps(state):
+        for v in values:
+            ts = canonical_timestamp(v)
+            if ts is not None:
+                return ts
+        return None
     for v in values:
         if v is None:
             continue
@@ -39,7 +64,9 @@ register_op({
     "id": "coalesce",
     "label": "First non-empty value",
     "description": "The value of the first column in the list that isn't empty — this column first, "
-                   "then the others in order. Rows where every listed column is blank stay blank.",
+                   "then the others in order. Rows where every listed column is blank stay blank. "
+                   "When every column is a timestamp column, the result is one too, whatever format "
+                   "each stores its times in.",
     "params": [{
         "name": "extra_columns", "label": "Then try", "type": "columns", "required": True,
         "help": "Checked in order after the column above. The first one with a value wins.",

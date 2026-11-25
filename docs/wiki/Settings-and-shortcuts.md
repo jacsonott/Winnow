@@ -415,7 +415,11 @@ default. The choices are **As stored**, `YYYY-MM-DD HH:MM:SS` (the default),
 
 This is display only: the stored and exported value is always the text the
 file came with. A format picked on one column (right-click its header) beats
-the case's setting, which beats this one. Plugin tabs and panels, such as the
+the case's setting, which beats this one. Under `YYYY-MM-DD HH:MM:SS`, a
+column Winnow converted from a number (**Parse a timestamp**, or a Chrome
+time converted as a SQLite table imports) also shows the fraction of a
+second its values carry, to the millisecond or the microsecond; see
+[Derived columns](Derived-columns.md#timestamps). Plugin tabs and panels, such as the
 Pivot and First/Last, show timestamps in the case's setting too. A case sets its own under
 **Case ▾ → Case settings… → Timestamps**.
 
