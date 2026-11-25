@@ -55,16 +55,25 @@ def test_exit_reasons_cover_the_matrix():
     assert srv._idle_exit_reason(idle + 1, _p(ever=False), busy=False) is None
 
 
+# The never-connected fuse is the one shrunk only where a test is about it.
+# It counts from the moment the module loads, so a slow start spends it
+# before the test can connect: on a Windows runner, startup plus the
+# readiness probe (a refused connect there takes a second to fail) ran past
+# 3s, and a test about a DROPPED stream exited as "no browser ever
+# connected" before its stream opened.
+NEVER_CONNECTS = {"WINNOW_NEVER_CONNECTED_EXIT_S": "3"}
+
+
 def _spawn(tmp_path, extra_env=None, args=()):
     return spawn_server(tmp_path, "--case", tmp_path / "idle.db", "--no-fts", *args,
                         env={"WINNOW_IDLE_EXIT_S": "2",
-                             "WINNOW_NEVER_CONNECTED_EXIT_S": "3",
+                             "WINNOW_NEVER_CONNECTED_EXIT_S": "120",
                              "WINNOW_IDLE_TICK_S": "0.3",
                              **(extra_env or {})})
 
 
 def test_a_server_nobody_connects_to_exits_by_itself(tmp_path):
-    server = _spawn(tmp_path)
+    server = _spawn(tmp_path, extra_env=NEVER_CONNECTS)
     code = server.wait_exit(30)
     out = server.log.finish()
     assert code == 0, f"expected a clean self-exit, got {code}:\n{out}"
@@ -128,7 +137,7 @@ def test_a_stream_that_drops_without_a_goodbye_still_exits_eventually(tmp_path):
 
 
 def test_the_flag_disables_it(tmp_path):
-    server = _spawn(tmp_path, args=("--no-idle-shutdown",))
+    server = _spawn(tmp_path, extra_env=NEVER_CONNECTS, args=("--no-idle-shutdown",))
     time.sleep(6)   # far past both shrunken graces
     try:
         assert server.proc.poll() is None, "exited despite --no-idle-shutdown"

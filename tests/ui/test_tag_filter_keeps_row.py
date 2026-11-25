@@ -7,10 +7,12 @@ below the fold. Only "Clear filters" found the row again, by identity.
 Place-keeping lives in `rebuildView` itself now (`keepRow`), so a filter
 change that lands somewhere new comes back to the same row, and a row the
 narrower view no longer has clears the cursor rather than leaving a stale
-number behind. The header box keeps its scroll offset as before, and
-whether the cursor follows the row there depends on the detail pane: open,
-it must (the pane shows whatever row the cursor names); closed, nothing
-looks, so no row lookup is issued for a keystroke.
+number behind. Typing in the header box keeps its scroll offset as
+before, and whether the cursor follows the row there depends on the detail
+pane: open, it must (the pane shows whatever row the cursor names); closed,
+nothing looks, so no row lookup is issued for a keystroke. Dropping the
+filter (Escape) is not typing, and lands on the row like every other drop
+— test_dropping_a_filter_keeps_row.py covers each way of doing it.
 """
 from __future__ import annotations
 
@@ -64,6 +66,15 @@ def _park(page):
 
 def _scroll_top(page):
     return page.evaluate("() => document.getElementById('body').scrollTop")
+
+
+def _cursor_row_on_screen(page):
+    page.wait_for_function("() => document.querySelector('#body .row.cursor') !== null")
+    return page.evaluate("""() => {
+      const b = document.getElementById('body').getBoundingClientRect();
+      const r = document.querySelector('#body .row.cursor').getBoundingClientRect();
+      return b.top + __winnow.headH() <= r.top && r.bottom <= b.bottom;
+    }""")
 
 
 def test_dropping_the_tag_filter_lands_on_the_row(page):
@@ -150,11 +161,17 @@ def test_the_header_box_keeps_its_offset_and_asks_nothing_with_the_pane_closed(p
         # installs the view, so once the count is in the cursor is settled.
         assert page.evaluate("() => __winnow.S.cursor") == at
         assert _scroll_top(page) == before
-        box.press("Escape")
-        page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 200")
-        assert page.evaluate("() => __winnow.S.cursor") == at
-        assert _scroll_top(page) == before
         assert asks == []
+        # Dropping the filter is not typing one (see
+        # test_dropping_a_filter_keeps_row.py): the view grows, so the old
+        # offset would name another part of the table, and it lands on the
+        # highlighted row instead — the one lookup this test sees.
+        shown = page.evaluate("() => __winnow.rowAt(__winnow.S.cursor).rid")
+        box.press("Escape")
+        page.wait_for_function(
+            "(rid) => __winnow.S.view && __winnow.S.view.row_count === 200 && __winnow.S.cursor === rid - 1", arg=shown)
+        assert _cursor_row_on_screen(page)
+        assert len(asks) == 1
     finally:
         _drop_filters(page)
         _park(page)
@@ -164,8 +181,9 @@ def test_the_header_box_keeps_the_open_pane_on_its_row(page):
     """With the detail pane open the cursor is the pane's row, and a number
     left behind puts whatever row now holds it into the pane as its page
     lands. So on this path — the pane open — the cursor follows the row to
-    its new position and back and the pane stays on the line it was
-    showing, while the viewport still does not move."""
+    its new position and the pane stays on the line it was showing, while
+    the viewport does not move for the typing. Escape then drops the
+    filter, which lands on the row."""
     at = 100   # rid 101: EventId 4624, which a "4" filter keeps
     box = page.locator('.fcell input[data-col="EventId"]')
     try:
@@ -186,11 +204,14 @@ def test_the_header_box_keeps_the_open_pane_on_its_row(page):
         assert page.locator("#detail").is_visible()
         assert page.evaluate("() => document.getElementById('detailTitle').textContent") == f"Line {at + 1}"
         assert _scroll_top(page) == before
+        # Escape drops the filter, and a drop lands on the row: back at
+        # its own position, on screen, pane still on it.
         box.press("Escape")
         page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 200")
         page.wait_for_function("(p) => __winnow.S.cursor === p", arg=at)
         assert page.locator("#detail").is_visible()
-        assert _scroll_top(page) == before
+        assert page.evaluate("() => document.getElementById('detailTitle').textContent") == f"Line {at + 1}"
+        assert _cursor_row_on_screen(page)
     finally:
         _drop_filters(page)
         _park(page)

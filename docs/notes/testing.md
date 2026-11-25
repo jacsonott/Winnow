@@ -49,6 +49,17 @@ timeframe, histogram, the `dmy_datetime` derived op, and that tsformat.js's
 formats. `tests/ui/test_timestamp_dmy_ui.py` is its browser half: the grid's
 first row, `parseTimestamp` against `_ts_normalize`, and the case set to
 DD-MM-YYYY HH:MM:SS.
+`test_derived_subsecond.py` holds what a converted timestamp column says
+about its fraction of a second (`subsecond`): epochs in each unit, a
+seconds column with a fraction on some rows, FILETIME's `.000000`, a text
+op (none), a re-derive, a merge of a seconds member and a milliseconds
+one, the open-time pass over a case from before the column existed, a
+copy to another case, and the SQLite import's Chrome-time conversion
+keeping its microseconds. `tests/ui/test_epoch_subsecond_ui.py` is the
+symptom: a millisecond epoch converted under the default format shows
+`.087` in the grid (it showed `…:40`), the header menu ticks the widened
+format and picking the plain one wins, and a format the case chose
+(US, milliseconds, As stored) is shown as chosen.
 `test_number_columns.py` holds each shape of "imported numbers sort as
 text" to a number column that sorts by value, through the reader it came
 in by: a "-" or "N/A" among the numbers, a column empty for the first 500
@@ -501,6 +512,17 @@ search works or not.
   busy (`python3 -c "while True: pass" &`, one per core), which turned
   a rare CI failure into roughly one run in eight, and record what each
   build and landing did in a `window` array to read back on failure.
+
+- **Shrink only the fuse a test is about.** A server spawned with
+  `WINNOW_NEVER_CONNECTED_EXIT_S` cut to seconds starts spending it when
+  the module loads, before the test can reach the port; on a Windows
+  runner, startup plus `spawn_server`'s readiness probe (a refused
+  connect there takes about a second to fail) ran past 3s, and
+  test_idle_shutdown.py's dropped-stream test exited as "no browser ever
+  connected" before its stream opened. The tests that connect now leave
+  that fuse long and only the two about it shorten it. Reproduce this
+  kind of failure by delaying startup and the probe rather than by
+  waiting for a slow runner.
 
 - **Two imports queued together finish in either order**, so the tables'
   ids come out in either order too. A test that compares sorted pairs of
