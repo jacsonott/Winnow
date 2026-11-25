@@ -657,7 +657,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   it **holds no state of its own**. Its ticks, pins, ⤒ ⤓ and drops write
   `S.layout`/`S.order` through the calls the table menu and the header
   use (`setColumnHidden`, `togglePin`, `moveColumn`, `setColumnOrder`,
-  `showAllColumns` in columns.js), and it is repainted *from* that state
+  `showAllColumns`, `hideAllColumns` in columns.js), and it is repainted *from* that state
   by `syncColumnDock`, which `renderHead` calls at its end. That is the
   whole sync story: every layout change already ends in `renderHead`, so
   a header drag, an Alt-click pin or a tick in the table menu shows in
@@ -2302,6 +2302,25 @@ see [docs/notes/README.md](README.md) for the whole set.
   forgotten filter otherwise. The toggle itself is `toggleDuplicateRows()`
   in timeframe.js, shared by the Columns pane button, Filters ▾ and the
   keymap action (no default key). tests/ui/test_hide_duplicate_rows_ui.py.
+- **Hide all is Show all's opposite, with three differences.** Both
+  lists have it (the table menu's Columns pane and the sidebar's list),
+  and both go through `hideAllColumns()` in columns.js. First, the rows
+  stay listed, under **Shown** too: the table menu's pane unticks its
+  boxes in place instead of calling `refresh()` (which redraws the pane
+  and would apply Shown's filter), and the sidebar list adds every row to
+  `dock.keepListed` first. Unticking everything is a step towards
+  ticking a few back, so a list that emptied itself would leave nothing
+  to tick from. Second, it offers **Undo** in a toast, as `replaceLayout`
+  does: the set of shown columns it wipes may have taken a while to
+  choose, and Show all is not the way back to it. The Undo restores the
+  columns that were shown, nothing more; it takes an `onUndo` so the
+  table menu's pane, which does not repaint from `S`, can repaint its
+  boxes if it is still open (the sidebar's list repaints from `S` through
+  `renderHead` as always). Third, a column grouped on is left alone:
+  `hidden` is never set on one (see Hide duplicate rows above), and it
+  comes back on Ungroup. A grid with no column left shows only the gutter
+  and Line; nothing in grid.js needs a column to paint.
+  tests/ui/test_columns_hide_all.py.
 - **saveLayout's 400 ms wait belongs to the table it started on.**
   `saveLayoutNow` reads `S` when it runs, and `openSource` moves
   `S.sourceId` to the next table at once but `S.layout`/`S.order` only
