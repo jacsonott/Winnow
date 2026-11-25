@@ -165,7 +165,7 @@ export function columnMenuItems(name) {
    filter the analyst can then edit or clear. */
 export async function showUnparsedRows(c) {
   try {
-    const res = await api(`/api/derived/${c.derived_id}/unparsed_filter`);
+    const res = await api(`/api/derived/${c.derived_id}/unparsed_filter?source_id=${S.sourceId}`);
     S.filterTree = { type: 'group', op: 'AND', children: [{ type: 'raw', sql: res.sql }] };
     updateFiltersButton();
     await rebuildView();

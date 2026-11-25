@@ -453,12 +453,13 @@ CREATE TABLE IF NOT EXISTS derived_columns (
     status         TEXT NOT NULL DEFAULT 'building',  -- building | ready | partial | error
     parse_failures INTEGER,            -- non-empty inputs that produced NULL; set at backfill end
     created_at     TEXT,
-    inferred_type  TEXT                -- number | text | empty, NULL until looked at; see below
+    inferred_type  TEXT                -- number | datetime | text | empty, NULL until looked at; see below
 );
 -- inferred_type is what a text-valued op's values turned out to be, read
 -- off the drv_ column when a backfill ends (_infer_derived_type). 'number'
 -- is what types the column as one (_derived_col_entry), so sizes and
--- counts captured with a regex sort as numbers rather than as text.
+-- counts captured with a regex sort as numbers rather than as text;
+-- 'datetime' likewise, for values all in the datetime ops' own shape.
 -- No index on source_id on purpose: this table holds one row per derived
 -- column in the whole case (tens at the very most), so a scan is one page
 -- either way, and at the 64KB page size _tune sets, an index would cost
@@ -2056,6 +2057,25 @@ def _sqlite_same_ident(a: str, b: str) -> bool:
 
 def _sql_text_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+# The shape every datetime derive op writes (timeparse._fmt), to the
+# second: a fraction after it is ".digits". _sql_is_canonical_ts.
+_CANONICAL_TS_GLOB = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]"
+
+
+def _sql_is_canonical_ts(expr: str) -> str:
+    """`expr` is a timestamp exactly as the datetime derive ops write one:
+    "YYYY-MM-DD HH:MM:SS", or that, a dot, and nothing but digits. Every
+    reader of a derived datetime column takes it in this shape — sorted
+    and compared as stored, never through TS_NORMALIZE — so this is what a
+    text-valued derived column has to hold throughout to be typed datetime
+    (Store._infer_derived_type). GLOB, not REGEXP: it stays in C, and the
+    answer for a timestamp column is a scan of every value. A fraction of
+    any length is allowed (EvtxECmd writes seven digits), since one sorts
+    against another, and against none, correctly as text."""
+    return (f"({expr} GLOB '{_CANONICAL_TS_GLOB}' OR ({expr} GLOB '{_CANONICAL_TS_GLOB}.[0-9]*' "
+            f"AND NOT substr({expr}, 21) GLOB '*[^0-9]*'))")
 
 
 def _sql_has_value(expr: str) -> str:
@@ -8694,9 +8714,12 @@ class Store:
         # a number column, and sort, compare and group as numbers. The op
         # can't say so up front — the same regex capture is a host name
         # in one column and a byte count in the next.
+        # The same goes for timestamps in the exact shape the datetime ops
+        # write (_infer_derived_type): a coalesce of two such columns is a
+        # datetime column, not text that happens to look like one.
         typ = op.get("value_type", "datetime")
-        if typ == "text" and r["inferred_type"] == "number":
-            typ = "number"
+        if typ == "text" and r["inferred_type"] in ("number", "datetime"):
+            typ = r["inferred_type"]
         return {
             "name": r["name"],
             "type": typ,
@@ -8874,11 +8897,12 @@ class Store:
             # member with nothing in the column (a host whose log never
             # has the field) says nothing either way, or one quiet host
             # would put the whole merge back to sorting as text.
+            # A datetime the same way: only when every member's copy is.
             held = {x.get("inferred_type") for x in every} - {None, "empty"}
             typ = c["type"]
             if held and all(timeparse.OPERATIONS.get(x.get("derived_op"), {}).get("value_type") == "text"
                             for x in every):
-                typ = "number" if held == {"number"} else "text"
+                typ = next(iter(held)) if held in ({"number"}, {"datetime"}) else "text"
             cols.append({**c,
                          "type": typ,
                          "derived_status": max((x.get("derived_status") for x in every),
@@ -9475,7 +9499,8 @@ class Store:
         return None
 
     def add_derived_column(self, source_id: int, name: str, input_column: str,
-                           op_id: str, params: dict | None = None) -> dict:
+                           op_id: str, params: dict | None = None,
+                           absent: Iterable[str] = ()) -> dict:
         """Define a derived column and kick off its backfill job.
 
         The values are materialised into the drv_<source_id> sidecar rather
@@ -9488,7 +9513,12 @@ class Store:
         concerned: if the job cannot be started (OpCancelled, the case
         closing), the definition is rolled back and the refusal raised —
         the same cancel-drops-the-partial-column contract this job carries
-        in `drop_on_cancel`."""
+        in `drop_on_cancel`.
+
+        `absent` (a real table only) names inputs the table may lack and
+        read as empty — what a session records for a column that was made
+        on a merge (_session_derived_def). On a merge the members' absent
+        inputs are worked out here, from the merge's columns."""
         if source_id < 0:
             # A merge has no table of its own — creating "on the merge"
             # means creating the same column on every member, after which
@@ -9496,20 +9526,29 @@ class Store:
             # All-or-nothing: validate against every member before touching
             # any, so a name collision on member 3 doesn't leave members
             # 1-2 with a column the merge never grows.
+            #
+            # The inputs are the MERGE's columns, not each member's: a
+            # member that lacks one reads it as empty, exactly as the merge
+            # shows that member's rows (_merge_derive_absent). Coalescing
+            # EvtxECmd's TimeCreated with MFTECmd's Created0x10 is the case
+            # this exists for — each column is on one table only, which is
+            # the whole reason to coalesce them.
             members = self._resolve_members(source_id)
+            inputs = timeparse.op_inputs(op_id, input_column, params)
+            self._check_merge_derive_inputs(self._source_lite(source_id), inputs)
+            absent: dict[int, set[str]] = {}
             for m in members:
                 msrc = self._source_lite(m["source_id"])
                 if self._find_column(msrc, (name or "").strip()):
                     raise ValueError(
                         f"Member table {msrc['name']!r} already has a column called {(name or '').strip()!r}")
-                for col in timeparse.op_inputs(op_id, input_column, params):
-                    if self._find_column(msrc, col) is None:
-                        raise ValueError(f"Member table {msrc['name']!r} has no column {col!r}")
+                absent[m["source_id"]] = self._merge_derive_absent(msrc, inputs)
             def_ids: list[int] = []
             try:
                 for m in members:
                     def_ids.append(self._define_derived_column(
-                        m["source_id"], name, input_column, op_id, params))
+                        m["source_id"], name, input_column, op_id, params,
+                        absent=absent[m["source_id"]]))
             except Exception:
                 # A check only a member's own definition makes (an input
                 # still building there) — the members before it go too.
@@ -9521,7 +9560,8 @@ class Store:
                     "member_definitions": definitions,
                     "job_id": job["job_id"],
                     "job_ids": [job["job_id"]]}
-        def_id = self._define_derived_column(source_id, name, input_column, op_id, params)
+        def_id = self._define_derived_column(source_id, name, input_column, op_id, params,
+                                             absent=absent)
         # Read back BEFORE the job starts: a backfill that fails at once
         # removes the column (_fail_derive_backfill), and on a busy machine
         # it can do that before this thread gets to the return below.
@@ -9562,11 +9602,53 @@ class Store:
             self._rollback_derive_definitions([d for ids in parts for d in ids])
             raise
 
+    def _check_merge_derive_inputs(self, merge_src: dict, inputs: Iterable[str]) -> None:
+        """What a derive on a merge may read: any column the merge shows,
+        whether every member has it or only some do — but not the merge's
+        own "From table" column, which is a label for each row's table
+        that no member holds, so a column derived from it would be empty
+        on every row."""
+        for col in inputs:
+            entry = self._find_column(merge_src, col)
+            if entry is None:
+                raise ValueError(f"This merge has no column called {col!r}")
+            if entry.get("source_column"):
+                raise ValueError(f"{entry['name']!r} names the table each row came from, which none of "
+                                 f"the merged tables holds as a column — it can't be derived from")
+
+    def _merge_derive_absent(self, msrc: dict, inputs: Iterable[str]) -> set[str]:
+        """The inputs of a derive made on a merge that one member lacks
+        (lower-cased, as _find_column matches): that member's definition
+        still names them, and reads each as empty (_input_ref)."""
+        return {c.lower() for c in inputs if self._find_column(msrc, c) is None}
+
+    def _input_ref(self, src: dict, column: str, alias: str | None = None) -> str:
+        """_col_ref for one input of a derived column, or NULL when the
+        table has no such column. A definition made on a merge names the
+        merge's columns, and a member that lacks one reads it as empty —
+        what the merge itself shows for that member's rows
+        (_member_projection) — so the member's column holds what the merge
+        would compute for those rows. Every reader of a definition's
+        inputs (the backfill, the failure count, the preview) goes through
+        here rather than _col_ref, which would spell a missing column into
+        the SQL and fail the statement."""
+        if self._find_column(src, column) is None:
+            return "NULL"
+        return self._col_ref(src, column, alias) if alias else self._col_ref(src, column)
+
     def _define_derived_column(self, source_id: int, name: str, input_column: str,
-                               op_id: str, params: dict | None) -> int:
+                               op_id: str, params: dict | None,
+                               absent: Iterable[str] = ()) -> int:
         """add_derived_column's checks and its definition row (status
         'building'), on one real table, without the job — so a merge can
-        make every member's before starting the one job that fills them."""
+        make every member's before starting the one job that fills them.
+
+        `absent` names inputs this table may lack (lower-cased): a merge's
+        column some other member has (_merge_derive_absent), or one a
+        session recorded the definition with. Each is read as empty. Any
+        other missing input is refused, as it always was — a plain table
+        gets no say-so to read a column it doesn't have."""
+        absent = {a.lower() for a in absent}
         op = timeparse.OPERATIONS.get(op_id)
         if op is None:
             raise ValueError(f"Unknown operation: {op_id}")
@@ -9586,9 +9668,11 @@ class Store:
         # Inputs: a parse operation reads one of the file's own columns; a
         # two-input operation (duration) can also read an already-built
         # derived datetime column, so deltas can chain off parsed values.
-        def _check_input(col: str, label: str) -> dict:
+        def _check_input(col: str, label: str) -> dict | None:
             entry = self._find_column(src, col)
             if entry is None:
+                if col.lower() in absent:
+                    return None   # read as empty on this table (_input_ref)
                 raise ValueError(f"No column called {col!r} to use as the {label}")
             # A derived input is fine — chains are how a JSON field that
             # holds XML gets taken apart in two steps, and the backfill
@@ -9679,8 +9763,13 @@ class Store:
             # Same fan-out contract as add_derived_column (invariant #9):
             # validate every spec against every member first, then create
             # the whole batch on each member — a collision anywhere fails
-            # before anything exists anywhere.
+            # before anything exists anywhere. The input is a column of
+            # the merge, and a member without it reads it as empty, as
+            # add_derived_column has it.
             members = self._resolve_members(source_id)
+            self._check_merge_derive_inputs(self._source_lite(source_id),
+                                            [str(spec.get("input_column") or "") for spec in specs])
+            absent: dict[int, set[str]] = {}
             for m in members:
                 msrc = self._source_lite(m["source_id"])
                 for spec in specs:
@@ -9688,13 +9777,13 @@ class Store:
                     if self._find_column(msrc, nm):
                         raise ValueError(
                             f"Member table {msrc['name']!r} already has a column called {nm!r}")
-                    if self._find_column(msrc, spec.get("input_column")) is None:
-                        raise ValueError(
-                            f"Member table {msrc['name']!r} has no column {spec.get('input_column')!r}")
+                absent[m["source_id"]] = self._merge_derive_absent(
+                    msrc, [str(spec.get("input_column") or "") for spec in specs])
             parts: list[list[int]] = []
             try:
                 for m in members:
-                    parts.append(self._define_derived_columns(m["source_id"], specs)[0])
+                    parts.append(self._define_derived_columns(m["source_id"], specs,
+                                                              absent=absent[m["source_id"]])[0])
             except Exception:
                 self._rollback_derive_definitions([d for ids in parts for d in ids])
                 raise
@@ -9726,10 +9815,12 @@ class Store:
     def _derive_batch_label(specs: list[dict]) -> str:
         return (specs[0].get("name") or "").strip() if len(specs) == 1 else f"{len(specs)} columns"
 
-    def _define_derived_columns(self, source_id: int, specs: list[dict]) -> tuple[list[int], str]:
+    def _define_derived_columns(self, source_id: int, specs: list[dict],
+                                absent: Iterable[str] = ()) -> tuple[list[int], str]:
         """add_derived_columns' checks and definition rows on one real
         table, without the job: (the new definition ids, the job's
-        label). See _define_derived_column."""
+        label). See _define_derived_column, `absent` included."""
+        absent = {a.lower() for a in absent}
         src = self._source_lite(source_id)
         drv = self._derived_table(source_id)
 
@@ -9757,12 +9848,12 @@ class Store:
             if name.lower() in taken:
                 raise ValueError(f"This table already has a column called {name!r}")
             entry = self._find_column(src, input_column)
-            if entry is None:
+            if entry is None and str(input_column or "").lower() not in absent:
                 raise ValueError(f"No column called {input_column!r} to read")
             # Same chain policy as add_derived_column: a derived input is
             # fine (flattening a derived JSON column is the natural second
             # step of a chain) — it just has to be finished.
-            if entry.get("derived") and entry.get("derived_status") != "ready":
+            if entry is not None and entry.get("derived") and entry.get("derived_status") != "ready":
                 raise ValueError(f"{input_column!r} is still building — wait for it to finish first")
             taken.add(name.lower())
             prepared.append({
@@ -10188,8 +10279,10 @@ class Store:
             raise ValueError(f"{scope[0]['name']!r} is not computed the same way on every table in "
                              f"this merge ({ways}) — re-derive it on each table on its own")
         prepared = []
+        merge_src = self._source_lite(source_id) if source_id is not None and source_id < 0 else None
         for d in scope:
             new_params = timeparse.validate_params(d["op_id"], params if params is not None else d["params"])
+            self._check_rederive_inputs(d, new_params, merge_src)
             op = timeparse.OPERATIONS[d["op_id"]]
             if op.get("check"):
                 # Same as add_derived_column: an op that references the case
@@ -10238,6 +10331,26 @@ class Store:
         if len(scope) > 1:
             out.update(member_definitions=definitions, job_ids=[job["job_id"]])
         return out
+
+    def _check_rederive_inputs(self, d: dict, params: dict, merge_src: dict | None) -> None:
+        """Every column a re-derive's new params name has to be one its
+        table can read: a column of the table, or — since the backfill
+        reads a column the table lacks as empty (_input_ref) — one of the
+        merge's when the re-derive is made on a merge, or one the
+        definition already named (it was made on a merge whose other
+        members have it, and is being re-derived on its own table now).
+        Anything else is refused here, with nothing changed. Before a
+        missing column could be read as empty this was the backfill's
+        "no such column"; now it would be a silently empty column."""
+        src = self._source_lite(d["source_id"])
+        before = {c.lower() for c in timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params"))}
+        for col in timeparse.op_inputs(d["op_id"], d["input_column"], params):
+            if self._find_column(src, col) is not None or col.lower() in before:
+                continue
+            if merge_src is not None:
+                self._check_merge_derive_inputs(merge_src, [col])
+                continue
+            raise ValueError(f"No column called {col!r} in {src['name']!r}")
 
     def backfill_derived_column(self, def_id: int, progress=None, cancel=None,
                                 drop_on_cancel: bool = False) -> dict:
@@ -10418,7 +10531,9 @@ class Store:
             for d in defs:
                 for c in timeparse.op_inputs(d["op_id"], d["input_column"], d["params"]):
                     real[c.lower()] = c
-            sel = ", ".join(self._col_ref(src, real[c]) for c in cols)
+            # _input_ref: an input this table lacks (a merge's column only
+            # some members have) is NULL in every row.
+            sel = ", ".join(self._input_ref(src, real[c]) for c in cols)
 
             names = [d["name"] for d in defs]
             assigns = ", ".join(f"{q(n)}=excluded.{q(n)}" for n in names)
@@ -10660,6 +10775,19 @@ class Store:
         none at all. None for an op that has a type of its own (a timestamp
         parse, a duration), which never needs looking at.
 
+        'datetime' when every value that isn't blank is a timestamp in
+        exactly the shape the datetime ops write ("YYYY-MM-DD HH:MM:SS",
+        then optionally a fraction; _sql_is_canonical_ts) — a coalesce of
+        EvtxECmd's TimeCreated and MFTECmd's Created0x10, or a JSON
+        field holding such stamps. Narrower than the import's DATE_RE on
+        purpose, and with no 80% allowance: every reader of a derived
+        datetime column takes it as canonical (text sort, the Timeline
+        and the timeframe filter compare it as stored, never through
+        TS_NORMALIZE), so a column is only called one when that is true
+        of every value. A US date, a "T" or a trailing zone keeps the
+        column text, as before; deriving a datetime column from it is
+        what makes it one.
+
         Read off the drv_ column as stored rather than tallied by the pass
         that wrote it, so it says the same thing however the values got
         there: a finished pass, a cancelled one, a copy from another case,
@@ -10667,9 +10795,10 @@ class Store:
         cheaper that approximates it, because _numeric_expr gates the sort
         and the comparisons on the same pattern — a column this calls
         'number' holds no value those would turn into NULL. A text column
-        answers at its first non-numeric value; a number column costs one
-        scan (~0.7s for 1.3M values), beside a pass that took seconds per
-        million rows."""
+        answers at its first value that is neither a number nor a
+        canonical timestamp; a number column costs one scan (~0.7s for
+        1.3M values), and a datetime one a second scan, in C (GLOB),
+        beside a pass that took seconds per million rows."""
         op = timeparse.OPERATIONS.get(d["op_id"]) or {}
         if op.get("value_type") != "text":
             return None
@@ -10680,7 +10809,14 @@ class Store:
         def ask(c: sqlite3.Connection) -> str:
             if c.execute(f"SELECT 1 FROM {drv} WHERE {said} AND NOT ({col} REGEXP ?) LIMIT 1",
                          (NUM_RE.pattern,)).fetchone():
-                return "text"
+                # Not a number column. A timestamp one, if every value
+                # with anything in it is canonical — no placeholder
+                # allowance here, since "-" is not a time a text sort
+                # or the Timeline could place.
+                if c.execute(f"SELECT 1 FROM {drv} WHERE {col} <> '' "
+                             f"AND NOT {_sql_is_canonical_ts(col)} LIMIT 1").fetchone():
+                    return "text"
+                return "datetime"
             if c.execute(f"SELECT 1 FROM {drv} WHERE {said} LIMIT 1").fetchone():
                 return "number"
             # Nothing but "-" and the like is text, as infer_type has it.
@@ -10698,23 +10834,39 @@ class Store:
         TRIM there, and a row where every listed column is empty is an
         empty row, not a failed one (the preview counts the same way)."""
         inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params"))
-        refs = [self._col_ref(src, c, alias) if alias else self._col_ref(src, c) for c in inputs]
-        if len(refs) == 1:
+        # An input the table lacks is empty in every row, so it is never
+        # what a row "had" (_input_ref) — and naming it would fail the SQL.
+        refs = [self._input_ref(src, c, alias) for c in inputs if self._find_column(src, c) is not None]
+        if not refs:
+            return "0"
+        if len(inputs) == 1:
             return f"({refs[0]} IS NOT NULL AND {refs[0]} <> '')"
         # TRIM's default strips spaces only; the op's blank is Python's
         # str.strip(), so name the whitespace explicitly.
         return "(" + " OR ".join(f"({r} IS NOT NULL AND TRIM({r}, ' \t\r\n') <> '')" for r in refs) + ")"
 
-    def unparsed_where_fragment(self, def_id: int) -> str:
+    def unparsed_where_fragment(self, def_id: int, source_id: int | None = None) -> str:
         """An advanced-filter fragment selecting exactly the rows that
         failed to parse, so "12 failures" is one click from "show me
         which 12". Built here rather than in the frontend because it has
-        to quote two analyst-named columns into SQL (invariant #5)."""
+        to quote two analyst-named columns into SQL (invariant #5).
+
+        `source_id` is the table the filter goes on: the column's own, or
+        a merge over it (whose column carries the first member's id). It
+        matters because a column made on a merge can read a column one
+        member lacks (_input_ref): the merge has every input, but on that
+        member's own table naming the missing one is "no such column", so
+        there it is left out — it is empty on every row anyway."""
         d = self.get_derived_column(def_id)
+        self._derived_scope(def_id, source_id)   # KeyError for a table the column isn't on
+        on = self._source_lite(source_id if source_id is not None else d["source_id"])
         inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params"))
+        held = [c for c in inputs if self._find_column(on, c) is not None]
+        if not held:
+            return f"{q(d['name'])} IS NULL AND 1 = 0"
         if len(inputs) == 1:
-            return f"{q(d['name'])} IS NULL AND {q(d['input_column'])} <> ''"
-        had = " OR ".join(f"TRIM(COALESCE({q(c)}, ''), ' \t\r\n') <> ''" for c in inputs)
+            return f"{q(d['name'])} IS NULL AND {q(held[0])} <> ''"
+        had = " OR ".join(f"TRIM(COALESCE({q(c)}, ''), ' \t\r\n') <> ''" for c in held)
         return f"{q(d['name'])} IS NULL AND ({had})"
 
     DETECT_SAMPLE = 200
@@ -10836,16 +10988,22 @@ class Store:
             return [r[0] for r in ro.execute(f"SELECT v FROM ({union}) LIMIT ?", (want,))]
 
     def _derive_preview_member(self, merge_id: int, columns: list[str]) -> int:
-        """The member a derive preview on a merge samples: its first. A
-        column only some members have can't be derived on the merge —
-        add_derived_column refuses it, member by member — so the preview
-        refuses it the same way, rather than as an unknown column."""
-        members = self._resolve_members(merge_id)
-        for m in members:
-            for col in columns:
-                if self._find_column(m["src"], col) is None:
-                    raise ValueError(f"Member table {m['src']['name']!r} has no column {col!r}")
-        return members[0]["source_id"]
+        """The member a one-column derive preview on a merge samples: the
+        first that has the column. A column only some members have is
+        derived on the merge like any other (add_derived_column: the
+        members without it read it as empty), so the preview reads it
+        where it is rather than refusing it or sampling a member that
+        would only offer blanks. The merge's "From table" label is refused
+        as add_derived_column refuses it."""
+        merge_src = self._source_lite(merge_id)
+        for col in columns:
+            if self._find_column(merge_src, col) is None:
+                raise KeyError(col)   # as an unknown column on a table is
+        self._check_merge_derive_inputs(merge_src, columns)
+        for m in self._resolve_members(merge_id):
+            if all(self._find_column(m["src"], col) is not None for col in columns):
+                return m["source_id"]
+        raise KeyError(columns[0])
 
     def detect_timestamp_format(self, source_id: int, column: str,
                                 custom_formats: list[dict] | None = None) -> list[dict]:
@@ -10960,7 +11118,7 @@ class Store:
         params = timeparse.validate_params(op_id, params)
         if view_id and not op["multi_input"]:
             if source_id < 0:
-                self._derive_preview_member(source_id, [column])   # refuses a partial column
+                self._derive_preview_member(source_id, [column])   # refuses the From table label
             samples = self._sample_column_in_view(view_id, column)
             return self._derived_preview_from(samples, op_id, params, limit, scope="view")
         # A multi-input operation reads several columns of the SAME row, so
@@ -10973,11 +11131,12 @@ class Store:
         # view" over rows the analyst filtered away, and a field in the
         # payload closes that while a new read path is a feature. So the
         # answer here is the table's, and it says "table".
+        if source_id < 0 and op["multi_input"]:
+            return self._preview_multi_on_merge(source_id, column, op_id, params, limit)
         if source_id < 0:
-            # Preview against the first member — representative, and the
-            # only side with a real table to sample.
-            source_id = self._derive_preview_member(
-                source_id, timeparse.op_inputs(op_id, column, params) if op["multi_input"] else [column])
+            # Preview against the first member that has the column —
+            # representative, and the only side with a real table to sample.
+            source_id = self._derive_preview_member(source_id, [column])
         src = self._source_lite(source_id)
         if self._find_column(src, column) is None:
             raise KeyError(column)
@@ -11005,6 +11164,49 @@ class Store:
                     "scope": "table"}
         return self._derived_preview_from(self._sample_column(src, column), op_id, params, limit,
                                           scope="table")
+
+    def _preview_multi_on_merge(self, merge_id: int, column: str, op_id: str, params: dict,
+                                limit: int) -> dict:
+        """preview_derived for an operation that reads several columns of a
+        row, on a merge: rows from EVERY member that holds any of the
+        inputs, the budget split between them, each read the way its
+        backfill will read it (_input_ref: a column it lacks is NULL).
+
+        It used to read the first member alone, which was representative
+        while every member had to hold every input. They no longer do, and
+        a coalesce of EvtxECmd's TimeCreated with MFTECmd's Created0x10 —
+        each on one table only — previewed against the first table showed
+        the first column on every row and never the second, which is the
+        half of the answer the analyst is checking. A member with none of
+        the inputs is skipped: every row of it is blank, and its share is
+        better spent on the members that answer. Same scope as before,
+        "table", for the reason preview_derived gives."""
+        merge_src = self._source_lite(merge_id)
+        inputs = timeparse.op_inputs(op_id, column, params)
+        for col in inputs:
+            if self._find_column(merge_src, col) is None:
+                raise KeyError(col)
+        self._check_merge_derive_inputs(merge_src, inputs)
+        op = timeparse.OPERATIONS[op_id]
+        members = [m for m in self._resolve_members(merge_id)
+                   if any(self._find_column(m["src"], c) is not None for c in inputs)]
+        per = max(1, limit // max(1, len(members)))
+        state: dict = {"inputs": list(inputs)}   # see backfill_derived_columns
+        if op.get("prepare"):
+            op["prepare"](self, params, state)
+        rows: list = []
+        with self._reader() as ro:
+            for m in members:
+                msrc = m["src"]
+                sel = ", ".join(self._input_ref(msrc, c) for c in inputs)
+                rows.extend(ro.execute(
+                    f"SELECT {sel} FROM {self._from_clause(msrc)} ORDER BY rid LIMIT ?", (per,),
+                ).fetchall())
+        preview = [{"input": r[0], "output": timeparse.parse_multi_or_none(op, list(r), params, state)}
+                   for r in rows]
+        failures = sum(1 for r, p in zip(rows, preview)
+                       if p["output"] is None and any(v is not None and str(v).strip() for v in r))
+        return {"preview": preview, "sampled": len(preview), "failures": failures, "scope": "table"}
 
     def _derived_preview_from(self, samples: list, op_id: str, params: dict, limit: int,
                               scope: str) -> dict:
@@ -18278,19 +18480,31 @@ class Store:
             # function of data the receiving case already has, so importing
             # re-runs the backfill rather than shipping a second copy of
             # every timestamp.
-            "derived_columns": [self._session_derived_def(d)
+            "derived_columns": [self._session_derived_def(d, src)
                                 for d in self.list_derived_columns(source_id)],
         }
 
-    def _session_derived_def(self, d: dict) -> dict:
+    def _session_derived_def(self, d: dict, src: dict | None = None) -> dict:
         """One derived column's definition as a session carries it. A
         lookup's params name its table by THIS case's source id, which means
         nothing in another case — or in this one, once the table is dropped
         and the id reused — so the table's identity travels beside it as
         `lookup_table` (the evidence's fingerprint and name, the keys session
         sources are matched by), and the receiving side resolves that
-        instead (_resolve_session_lookup)."""
+        instead (_resolve_session_lookup).
+
+        A column made on a merge can read a column this table lacks (a
+        merge column only other members have, read here as empty —
+        _input_ref). Those inputs travel as `absent_inputs`, so the load
+        recreates the column reading them the same way; any OTHER missing
+        input is still refused there — a parent column that failed to
+        come back must not leave its child silently empty."""
         out = {k: d[k] for k in ("name", "input_column", "op_id", "params")}
+        if src is not None:
+            missing = [c for c in timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params"))
+                       if self._find_column(src, c) is None]
+            if missing:
+                out["absent_inputs"] = missing
         if d["op_id"] == "lookup":
             try:
                 other = self._source_lite(int((d.get("params") or {}).get("other_source_id")))
@@ -18529,8 +18743,11 @@ class Store:
                     jid = pending_jobs.get(inp.lower())
                     if jid:
                         self.wait_for_ingest_job(jid, timeout=600)
+                absent = d.get("absent_inputs") or []
+                if not isinstance(absent, list) or not all(isinstance(a, str) for a in absent):
+                    raise ValueError("its absent_inputs is not a list of column names")
                 res = self.add_derived_column(source_id, d["name"], d["input_column"],
-                                              d["op_id"], params)
+                                              d["op_id"], params, absent=absent)
                 pending_jobs[d["name"].lower()] = res["job_id"]
                 derived_added += 1
             except (ValueError, KeyError) as e:

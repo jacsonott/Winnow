@@ -253,6 +253,16 @@ searchable, that merge eligibility is unaffected, and both cancel
 semantics (driven through the backfill's own cancel hook, so the
 cancellation point is deterministic rather than a race — same technique
 as `test_ingest_jobs.py`).
+`test_derived_merge_partial.py` is the report that a coalesce on a merge
+of EvtxECmd's TimeCreated and MFTECmd's Created0x10 was refused because
+each column is on one table only: the coalesce, its preview reading
+both tables, the column typed datetime and sorting, filtering and
+charting by time on the merge; then that it was never about timestamps
+(a text coalesce, a one-column op and the batch route over a column one
+table has), re-derive on the merge and on a member, the "Show N unparsed
+rows" fragment on a member that lacks an input, a session carrying the
+inputs a table lacks (and still refusing one it does not vouch for), and
+the canonical-timestamp typing rule case by case.
 `test_esxi_log_shapes.py` covers the esxi_logs plugin's parser one line
 shape at a time (ESXi 5.x to 8.x hostd, vmkernel, vobd, shell, rhttpproxy,
 Linux RFC 3164, RFC 3339 and RFC 5424), its iisread-style column rules (the

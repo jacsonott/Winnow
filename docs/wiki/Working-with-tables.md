@@ -274,7 +274,7 @@ Columns are matched by name. The order doesn't matter, and case is ignored for A
 - **Only shared columns** shows just the columns every table has.
 - The **From table** column shows which table each row came from, by its nickname if it has one. You can filter, sort and group by it like any other column.
 
-Only the columns the tables were imported with are compared. A derived column appears in a merge when every table in it has one of that name. To add one to a merge, its input column has to be in every table.
+Only the columns the tables were imported with are compared. A derived column appears in a merge when every table in it has one of that name. You can add one to a merge from any of its columns, including one only some of its tables have: the tables without it read it as empty (see [Derived columns on merged tables](Derived-columns.md#derived-columns-on-merged-tables)).
 
 To change a merge, right-click it and choose **Edit merge…**, or use **Edit merge…** in the **This table** section of the table menu. You can add or remove tables, switch between every column and shared columns, turn the From table column on or off, and rename it. The merge keeps its tab and layout.
 
