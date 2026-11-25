@@ -5,8 +5,8 @@ The default layout for a header set reaches only tables with exactly the
 same columns, and saving one changes what every later import of them
 opens to. What was asked for was one table's order put on another, and
 two exports of the same log from two tool versions differ by a column or
-two. Taking the layout from another table in the table menu's Layout
-section does that: the shared columns take the other table's order,
+two. Copying another table's layout onto this one, in the table menu's
+Save & copy layout section, does that: the shared columns take the other table's order,
 visibility and widths, and a column only this table has stays beside the
 column it follows."""
 
@@ -64,13 +64,17 @@ def test_copying_a_layout_between_tables_whose_columns_differ(page, api, tmp_pat
         page.locator(".tm-layout-from").select_option(key)
         page.wait_for_function("() => !document.querySelector('.tm-layout-preview.stale')"
                                " && document.querySelector('.copy-layout-col')?.dataset.col === 'CpCmd'")
+        # The preview opens on the columns that change; this is about where
+        # every column lands, which is what All columns shows.
+        page.locator('.tm-layout-view button[data-key="all"]').click()
         want = ["CpCmd", "CpUser", "CpWhen", "CpExtra", "CpHost"]
+        page.wait_for_function("(n) => document.querySelectorAll('.copy-layout-col').length === n", arg=len(want))
         assert page.locator(".copy-layout-col").evaluate_all("(rs) => rs.map((r) => r.dataset.col)") == want
         # Only what applying would change is marked: CpExtra keeps its
         # place after CpWhen, and the moves are the shared columns'.
         changed = page.locator(".copy-layout-col.tm-changed").evaluate_all("(rs) => rs.map((r) => r.dataset.col)")
         assert "CpExtra" not in changed and "CpCmd" in changed and "CpHost" in changed, changed
-        page.locator("#modalBody .btn", has_text="Apply layout").click()
+        page.locator("#modalBody .btn", has_text="Apply to this table").click()
         page.wait_for_function("(w) => __winnow.S.order.join() === w.join()", arg=want)
 
         # A's order, A's hidden column hidden, A's width; B's extra column

@@ -6,8 +6,8 @@ Reset view on another table with the same headers, and that table kept
 its own order. Opening a table seeds the default only into one that has
 never saved a layout, and Reset view keeps the layout on purpose, so
 nothing in the app could put the default on a table opened before it was
-saved. The table menu's Layout section, taking the layout from the
-default saved for these columns, is the way to do that now."""
+saved. The table menu's Save & copy layout section, copying the default
+saved for these columns onto the table, is the way to do that now."""
 
 from __future__ import annotations
 
@@ -49,23 +49,32 @@ def _table_menu_button(page, label):
 def _layout_section(page):
     page.evaluate("() => __winnow.openTableMenu(undefined, 'layout')")
     page.wait_for_selector(".tm-layout-from")
+    page.wait_for_function("() => !/Looking/.test(document.querySelector('.tm-layout-state').textContent)")
 
 
 def _save_default(page):
+    """The one button in the Default-for-these-columns card. Its label
+    says whether it saves the first default or replaces the one saved,
+    so the card is what the click is aimed at, not a label."""
     _layout_section(page)
-    page.locator("#modalBody .btn", has_text="Save this layout as the default").click()
+    page.wait_for_function("() => { const b = document.querySelector('.tm-layout-default button');"
+                           " return b && !b.disabled; }")
+    page.locator(".tm-layout-default button").click()
 
 
 def _apply_default(page):
-    """The Layout section opens on the saved default once it has been
-    found; Apply layout puts it on the table."""
+    """The section opens on this table as it is; picking the saved
+    default under Showing previews it, and Apply to this table puts it on
+    the table."""
     _layout_section(page)
+    page.wait_for_function("() => !document.querySelector('.tm-layout-from option[value=default]').disabled")
+    page.locator(".tm-layout-from").select_option("default")
     page.wait_for_function("""() => {
       const s = document.querySelector('.tm-layout-from');
-      const b = [...document.querySelectorAll('#modalBody .btn')].find((x) => x.textContent === 'Apply layout');
+      const b = [...document.querySelectorAll('#modalBody .btn')].find((x) => x.textContent === 'Apply to this table');
       return s && s.value === 'default' && b && !b.disabled;
     }""")
-    page.locator("#modalBody .btn", has_text="Apply layout").click()
+    page.locator("#modalBody .btn", has_text="Apply to this table").click()
 
 
 def _wait_derived(api, sid, timeout=25.0):
@@ -170,7 +179,7 @@ def test_with_no_default_saved_it_says_so_and_leaves_the_layout(page, api, tmp_p
         page.wait_for_function("() => /none saved yet/.test(document.querySelector('.tm-layout-from').textContent)")
         assert page.locator(".tm-layout-from option[value=default]").is_disabled()
         assert "no default is saved" in page.locator("#modalBody .mb-notes").inner_text()
-        assert page.locator("#modalBody .btn", has_text="Apply layout").is_disabled()
+        assert page.locator("#modalBody .btn", has_text="Apply to this table").is_disabled()
         assert page.evaluate("() => [...__winnow.S.order]") == before
     finally:
         api(f"/api/source/{sid}", "DELETE")
@@ -205,8 +214,14 @@ def test_applying_while_grouped_keeps_the_grouped_column_out_until_ungrouped(pag
         page.evaluate("() => __winnow.addGroupLevel('AdlHost')")
         page.wait_for_function("() => !document.querySelector('.hcell[data-col=\"AdlHost\"]')")
         _layout_section(page)
+        page.wait_for_function("() => !document.querySelector('.tm-layout-from option[value=default]').disabled")
+        page.locator(".tm-layout-from").select_option("default")
         page.wait_for_function("() => !document.querySelector('.tm-layout-preview.stale')"
                                " && document.querySelector('.copy-layout-col')?.dataset.col === 'AdlCmd'")
+        # All columns, not just the ones that change: the grouped column
+        # is left out of both, and this is the view that would show it.
+        page.locator('.tm-layout-view button[data-key="all"]').click()
+        page.wait_for_function("() => document.querySelectorAll('.copy-layout-col').length === 3")
         listed = page.locator(".copy-layout-col").evaluate_all("(rs) => rs.map((r) => r.dataset.col)")
         assert listed == ["AdlCmd", "AdlUser", "AdlWhen"], "the grouped column is left out of the preview"
         _apply_default(page)

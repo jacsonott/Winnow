@@ -820,7 +820,7 @@ export function saveLayout() {
    to it. Independent of saveLayout() above, which persists per-source
    inside this one case. */
 export async function saveDefaultLayout() {
-  if (!S.sourceId || !S.columns.length) return;
+  if (!S.sourceId || !S.columns.length) return false;
   try {
     await post('/api/column_layouts', {
       // Keyed by the imported file's own columns: a derived column is this
@@ -830,9 +830,11 @@ export async function saveDefaultLayout() {
     });
     // Said here because it is exactly what went wrong: a table that
     // already has a layout keeps it, and nothing else said so.
-    toast('Saved as the default layout for these columns. A table that already has a layout keeps it until the default is applied from Layout in its table menu', 6000);
+    toast('Saved as the default layout for these columns. A table that already has a layout keeps it until the default is copied onto it from Save & copy layout in its table menu', 6000);
+    return true;
   } catch (e) {
     toast('Could not save default layout: ' + e.message, 4000);
+    return false;
   }
 }
 
@@ -887,11 +889,11 @@ export async function applyDefaultLayout() {
   }
   if (S.sourceId !== id) return;
   if (!found) {
-    toast('No default layout is saved for these columns yet — "Save this layout as the default" under Layout in the table menu of a table with them saves one', 5000);
+    toast('No default layout is saved for these columns yet — "Save this table’s layout as the default", under Save & copy layout in the table menu of a table with them, saves one', 5000);
     return;
   }
   const { order, layout } = defaultLayoutResult(found);
-  replaceLayout(order, layout, 'Applied the default layout for these columns');
+  replaceLayout(order, layout, 'Copied the default layout for these columns onto this table');
 }
 
 /* What applying a saved default leaves on the table on screen: the
