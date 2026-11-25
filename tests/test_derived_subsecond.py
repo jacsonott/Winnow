@@ -172,10 +172,31 @@ def test_a_case_from_before_the_column_existed_opens_and_is_looked_at(case_path,
         def_id = _add(s, sid, "T", "Us")
     finally:
         s.close()
+    # The table as such a case has it, comment and all: rebuilt rather
+    # than DROP COLUMN, which some SQLite builds refuse on this schema's
+    # trailing comment ("incomplete input"), and which isn't how a case
+    # from before came to lack the column anyway.
     db = sqlite3.connect(case_path)
     try:
-        db.execute("ALTER TABLE derived_columns DROP COLUMN subsecond")
-        db.commit()
+        db.executescript("""
+            CREATE TABLE derived_columns_old (
+                id             INTEGER PRIMARY KEY,
+                source_id      INTEGER NOT NULL,
+                name           TEXT NOT NULL,
+                input_column   TEXT NOT NULL,
+                op_id          TEXT NOT NULL,
+                params         TEXT NOT NULL DEFAULT '{}',
+                status         TEXT NOT NULL DEFAULT 'building',
+                parse_failures INTEGER,
+                created_at     TEXT,
+                inferred_type  TEXT                -- number | datetime | text | empty
+            );
+            INSERT INTO derived_columns_old
+                SELECT id, source_id, name, input_column, op_id, params, status,
+                       parse_failures, created_at, inferred_type FROM derived_columns;
+            DROP TABLE derived_columns;
+            ALTER TABLE derived_columns_old RENAME TO derived_columns;
+        """)
     finally:
         db.close()
     s = Store(case_path)
