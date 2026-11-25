@@ -40,6 +40,19 @@ Things to know before you rely on one:
   On a merged table the column is a number column when no member table's
   copy holds text. A timestamp column is always a datetime column, and
   **Duration between two columns** always a number column.
+- **Timestamps can be a datetime column too.** A column of extracted,
+  decoded, combined or looked-up values is a datetime column when every
+  value in it is written `YYYY-MM-DD HH:MM:SS`, with or without a
+  fraction of a second after it (`2024-01-05 13:25:21.1234567`). That is
+  how EvtxECmd, MFTECmd and the other EZ Tools write times, and how every
+  derived timestamp is written. So **First non-empty value** over two
+  such columns gives a column you can sort by time, choose in the
+  timeframe filter, the histogram and the Timeline, and show in any
+  timestamp format. One value in another shape (a `T` between the date
+  and the time, a time zone after it, a US date, a `-`) keeps the column
+  text; derive a timestamp from it with **Parse a timestamp** to get a
+  datetime column. On a merged table the column is a datetime column when
+  no member table's copy holds anything else.
 - **It doesn't change what the table is.** Saved filters,
   [Timeline configurations](Timeline-search-and-watchlist.md#choosing-the-timestamp-type-and-body)
   and merging are matched on the file's own columns, so adding a derived
@@ -515,7 +528,7 @@ derive **Base64 decode** from that column.
 
 | Operation | What it does | Example |
 | --- | --- | --- |
-| **First non-empty value** | The **Parse column**, then each column under **Then try**, in order; the first that isn't blank wins. All blank stays blank | `SubjectUserName` blank, then `TargetUserName` = `alice` → `alice` |
+| **First non-empty value** | The **Parse column**, then each column under **Then try**, in order; the first that isn't blank wins. All blank stays blank. On a merged table the columns can each be in different tables (see [Derived columns on merged tables](#derived-columns-on-merged-tables)) | `SubjectUserName` blank, then `TargetUserName` = `alice` → `alice` |
 | **Row as JSON** | The **Parse column** plus the listed **Columns** as one compact JSON object per row, for pasting into a ticket or a note. Every other column starts listed; remove what you don't want. **Skip empty cells** leaves blanks out | `{"Host":"WS01","EventId":4624,"Code":"007"}` |
 
 In **Row as JSON**, a cell is written as a bare number only when that
@@ -594,8 +607,25 @@ open and Winnow adds it to each member table, checking all of them first,
 so a name clash on one member stops it everywhere. One job fills it in,
 working through the member tables one after another; its row in the jobs
 panel says which table it is on, such as `User — 2/4: b.csv`. Cancelling
-it removes the new column from every member table. The preview samples the
-first member, or the merged view under **This view**.
+it removes the new column from every member table.
+
+The columns it reads can be any of the merge's columns, including one only
+some of its tables have. A table without that column reads it as empty,
+just as the merge shows that table's rows. This is what makes
+**First non-empty value** useful on a merge of two tools' output: with
+EvtxECmd's `TimeCreated` in one table and MFTECmd's `Created0x10` in
+another, **First non-empty value** of `TimeCreated` then `Created0x10`
+gives one **When** column that holds each row's own time, and a datetime
+column that sorts both tables' rows together (see
+[What a derived column is](#what-a-derived-column-is)).
+A table that has none of the columns gets an empty column, which is not
+counted as unparsed. The merge's **From table** column can't be derived
+from, since none of the tables holds it.
+
+The preview samples the first member table that has the column, or the
+merged view under **This view**. For an operation that reads several
+columns, such as **First non-empty value**, it samples rows from every
+member table that has any of them, so you see each column answer.
 
 A derived column on one member table is never shown as another member's
 column from its file, even when the two have the same name. If `b.csv`

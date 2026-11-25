@@ -6064,12 +6064,13 @@ def api_derived_regex_groups(body: RegexGroupsProbe):
 
 
 @app.get("/api/derived/{def_id}/unparsed_filter")
-def api_derived_unparsed_filter(def_id: int):
+def api_derived_unparsed_filter(def_id: int, source_id: int | None = None):
     """The advanced-filter fragment for "show me the rows that didn't
     parse" — built server-side so the UI never has to quote a column name
-    into SQL itself."""
+    into SQL itself. `source_id` is the table it will filter (the column's
+    own, or a merge over it), as on the remove and re-derive routes."""
     try:
-        return {"sql": store().unparsed_where_fragment(def_id)}
+        return {"sql": store().unparsed_where_fragment(def_id, source_id)}
     except KeyError as e:
         raise HTTPException(404, str(e))
 

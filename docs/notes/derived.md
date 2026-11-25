@@ -547,6 +547,50 @@ see [docs/notes/README.md](README.md) for the whole set.
   status (`_DERIVED_STATUS_RANK` — building, error, partial, ready) and
   the failures SUMMED, because the "Show N unparsed rows" filter it
   offers matches rows in every member; it used to count the first.
+- **A derive on a merge reads the MERGE's columns; a member that lacks
+  one reads it as empty** (`_check_merge_derive_inputs`,
+  `_merge_derive_absent`, `_input_ref`). It used to refuse any input a
+  member lacked ("Member table 'evtx' has no column 'Created0x10'"), in
+  create, the batch and every preview. That made the obvious use of
+  coalesce on a mismatched merge impossible: EvtxECmd's TimeCreated on
+  one table and MFTECmd's Created0x10 on the other are each on one table
+  only, which is the whole reason to coalesce them. Now every member
+  still gets a definition naming the same inputs (one op, one set of
+  params, so re-derive, rename and remove on the merge work unchanged),
+  `_define_derived_column(s)` accepts the ones in `absent` as missing,
+  and everything that reads a definition's inputs — the backfill's
+  SELECT, `_had_input_sql` (the failure count), the merge preview — goes
+  through `_input_ref`, which is `NULL` for a column the table lacks.
+  That is the same NULL `_member_projection` shows for the member's
+  rows, so the member's column holds what the merge would compute for
+  them. A member with none of the inputs gets an all-empty column with no
+  failures, and its 'empty' type says nothing to the merge's typing.
+  What is still refused: a column the merge doesn't have, and the
+  merge's "From table" label (no member holds it, so the column would be
+  empty everywhere).
+  Four places had to learn about it. **Re-derive** never checked inputs,
+  because the backfill's "no such column" did; with missing inputs read
+  as empty that would be a silently empty column, so
+  `_check_rederive_inputs` refuses a name that is not the table's, not
+  the merge's (on a merge re-derive) and not already in the definition.
+  **"Show N unparsed rows"** sends the table it filters
+  (`unparsed_where_fragment(def_id, source_id)`): on the merge every
+  input exists, but on a member's own table naming the one it lacks is
+  "no such column", so it is left out there. **Sessions** record the
+  inputs a table lacked (`absent_inputs`, `_session_derived_def`) and
+  the load allows exactly those — not every missing input, or a parent
+  that failed to come back would leave its child silently empty, which
+  is what the warning exists for. **The multi-input preview** on a merge
+  used to read the first member alone; that member now shows only the
+  first input, never the second, so `_preview_multi_on_merge` reads
+  rows from every member that has any input, budget split evenly
+  (`_sample_column_in_view`'s reasoning). The one-column previews read
+  the first member that HAS the column (`_derive_preview_member`).
+  One edge left as it was: a member with a DERIVED column named like a
+  merge file column it lacks (_member_column says it lacks it) has that
+  derived column found by `_find_column`, so a derive on the merge reads
+  it there. Rare enough to leave, and it was the behavior before.
+  tests/test_derived_merge_partial.py, test_merge_mismatched.py.
 - **A merge's derive is ONE job that backfills the members in turn**
   (`_backfill_derive_parts`, options `parts`: each member's def ids,
   plus `previous` on a re-derive). Create, a batch (named groups, a
@@ -646,6 +690,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   or one quiet host would put the whole merge back to sorting as text.
   `derived_kind` is untouched: the menus that key on "extracted" still
   see one.
+- **A text-valued op's column is a DATETIME column when every value is
+  canonical** (`_sql_is_canonical_ts`: `YYYY-MM-DD HH:MM:SS`, optionally
+  `.digits`, nothing else). The point is a coalesce of two timestamp
+  columns (TimeCreated, Created0x10) being a timestamp column, not text
+  that looks like one. The rule is deliberately much narrower than the
+  import's DATE_RE and has no 80% allowance, because every reader of a
+  derived datetime column takes it as canonical by construction: sort
+  skips `_time_sort_columns`, the timeframe skips `_column_is_date_led`,
+  the histogram and the Timeline use the value as stored rather than
+  TS_NORMALIZE. A value with a `T`, a zone, a one-digit hour or a US date
+  would be mis-sorted or mis-placed by all of those, so it keeps the
+  column text (deriving a timestamp from it is the way to a datetime
+  column). A fraction of any length is allowed: EvtxECmd writes seven
+  digits, and fractions of different lengths still sort right as text.
+  GLOB, not REGEXP, so the scan a timestamp column costs stays in C; it
+  runs only after the column has already been found not to be a number.
+  The merge's twin is datetime only when every member's copy is
+  ('empty' members say nothing, as for numbers). Existing columns typed
+  'text' before this keep it until a pass rewrites them; only NULL is
+  looked at on open.
 - **That open-time typing runs on a thread, never inside `Store()`.**
   It shipped inline at the end of `__init__`, under the writer lock, and
   one number column is a full scan — so a case with a few million rows

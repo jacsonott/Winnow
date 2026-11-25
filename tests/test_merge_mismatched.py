@@ -323,19 +323,23 @@ def test_save_view_as_table_pads_missing_columns(store, abc):
                     ("c.csv", "2024-01-03 09:00:00", "", "", "needle")]
 
 
-def test_deriving_from_a_column_only_some_tables_have_is_refused_up_front(store, abc):
-    """add_derived_column on a merge makes the column on every member, so
-    it refuses one a member lacks; the previews before it say so too,
-    rather than "no such column" or a preview of a column it won't make."""
+def test_deriving_from_a_column_only_some_tables_have(store, abc):
+    """A merge column only some members have derives like any other: the
+    members without it read it as empty, exactly as the merge shows their
+    rows. This used to be refused up front ("Member table 'a.csv' has no
+    column 'Extra'"), which made a coalesce of two tools' timestamp
+    columns — each on one table only — impossible on the merge. The
+    previews read the column where it is rather than refusing."""
     a, b, c = abc
     mid = store.create_merge("m", [a, b, c])["id"]
     v = _view(store, mid, filters=[{"column": "Msg", "op": "contains", "value": "o"}])
-    for attempt in (lambda: store.detect_timestamp_format(mid, "Extra"),
-                    lambda: store.preview_derived(mid, "Extra", "iso8601"),
-                    lambda: store.preview_derived(mid, "Extra", "iso8601", view_id=v["view_id"]),
-                    lambda: store.add_derived_column(mid, "When", "Extra", "iso8601")):
-        with pytest.raises(ValueError, match="has no column 'Extra'"):
-            attempt()
+    rx = {"pattern": r"(\w)"}
+    # Previews sample the member that has it (b), from the table or the view.
+    res = store.preview_derived(mid, "Extra", "regex_extract", rx)
+    assert [p["input"] for p in res["preview"]] == ["x", "y", "x"]
+    res = store.preview_derived(mid, "Extra", "regex_extract", rx, view_id=v["view_id"])
+    assert (res["scope"], [p["input"] for p in res["preview"]]) == ("view", ["x", "x"])
+    assert store.detect_timestamp_format(mid, "Extra") == []   # x and y are no format; no refusal
     # One every table has (B spells it "TIME") previews from every table
     # in the view: "delta failed" is the one row the filter leaves out.
     res = store.preview_derived(mid, "Time", "iso8601", view_id=v["view_id"])
@@ -343,6 +347,30 @@ def test_deriving_from_a_column_only_some_tables_have_is_refused_up_front(store,
     assert [p["input"] for p in res["preview"]] == [
         "2024-01-01 10:00:00", "2024-01-01 11:00:00", "2024-01-02 10:00:00",
         "2024-01-02 12:00:00", "2024-01-03 09:00:00"]
+    made = store.add_derived_column(mid, "Flag", "Extra", "regex_extract", rx)
+    store.wait_for_ingest_job(made["job_id"], timeout=30)
+    assert [d["source_id"] for d in made["member_definitions"]] == [a, b, c]
+    flag = next(col for col in store.get_source(mid)["columns"] if col["name"] == "Flag")
+    # Nothing to read on a and c is no failure there.
+    assert (flag["derived_status"], flag["parse_failures"]) == ("ready", 0)
+    v2 = _view(store, mid, sort=[{"column": "Time", "dir": "asc"}])
+    assert _cells(store, mid, v2, "Flag") == [None, None, "x", "y", "x", None]
+
+
+def test_a_column_the_merge_does_not_have_is_still_refused(store, abc):
+    a, b, c = abc
+    mid = store.create_merge("m", [a, b, c], source_column=True)["id"]
+    with pytest.raises(ValueError, match="This merge has no column called 'Nope'"):
+        store.add_derived_column(mid, "N", "Nope", "iso8601")
+    with pytest.raises(KeyError):
+        store.preview_derived(mid, "Nope", "iso8601")
+    # The From table column is the merge's label for each row's table:
+    # no member holds it, so a column derived from it would be empty.
+    for attempt in (lambda: store.add_derived_column(mid, "N", "From table", "regex_extract", {"pattern": "(a)"}),
+                    lambda: store.preview_derived(mid, "From table", "regex_extract", {"pattern": "(a)"})):
+        with pytest.raises(ValueError, match="names the table each row came from"):
+            attempt()
+    assert not any(store.list_derived_columns(t) for t in (a, b, c))
 
 
 # ---------------------------------------------------------- source column
