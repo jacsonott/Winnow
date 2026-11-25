@@ -2,7 +2,7 @@
 navigation that survive everything else being cleared.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { copiedColumns, copiedOrder, defaultLayoutResult, findDefaultLayout, isPinned, moveColumn, renderHead, replaceLayout, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
+import { copiedColumns, copiedOrder, defaultLayoutResult, findDefaultLayout, hideAllColumns, isPinned, moveColumn, renderHead, replaceLayout, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
 import { paintDockToggles, pinFromTableMenu } from './columndock.js';
 import { $, api, el, nameMap, post, toast } from './core.js';
 import { openDerivedColumnModal } from './derived.js';
@@ -769,7 +769,7 @@ export function saveColumnsListMode(mode) {
 }
 
 /* The Columns pane of the table menu. `refresh` repaints the pane after a
-   bulk action ("Show all"/"Hide empty") — the per-column checkboxes
+   bulk action ("Show all"/"Hide empty"; Hide all unticks in place) — the per-column checkboxes
    repaint the grid directly and don't need it. Anything that changes what
    the side list says about this pane (how many columns are shown) sends
    `tablemenu:changed` up from the container instead. */
@@ -823,6 +823,7 @@ export function buildColumnsPanel(container, refresh = () => openTableMenu()) {
   foot.append(el('p', 'fb-help', 'Drag a row, or a column header in the grid, to reorder. ⤒ ⤓ send one straight to an end.'));
   box.append(scroller, foot);
   const rows = new Map();
+  const ticks = new Map();   // name → its checkbox, for Hide all and its Undo
   // What is left out is worked out here, on a name typed or the switch
   // flipped — never on a box unticked. A row unticked under Shown stays
   // where it is until the list is next filtered or the menu reopens, so a
@@ -867,6 +868,7 @@ export function buildColumnsPanel(container, refresh = () => openTableMenu()) {
     const cb = el('input');
     cb.type = 'checkbox';
     cb.checked = !(S.layout[name] || {}).hidden;
+    ticks.set(name, cb);
     cb.onchange = () => {
       S.layout[name] = { ...(S.layout[name] || {}), hidden: !cb.checked };
       renderHead(); render(); saveLayout();
@@ -971,8 +973,24 @@ export function buildColumnsPanel(container, refresh = () => openTableMenu()) {
   acts.append(addDerived);
   const all = el('button', 'btn ghost', 'Show all');
   all.onclick = () => { for (const n of S.order) S.layout[n] = { ...(S.layout[n] || {}), hidden: false }; renderHead(); render(); saveLayout(); refresh(); };
-  const none = el('button', 'btn ghost', 'Hide empty columns');
-  none.onclick = async () => {
+  // The other way round, for a wide table where the few columns wanted are
+  // quicker to tick than the rest are to untick. The boxes are unticked in
+  // place rather than the pane redrawn, so every row stays listed, under
+  // Shown too (a box unticked by hand stays put the same way), and the
+  // list is right there to tick from. Its toast's Undo puts the ticks
+  // back; this pane only repaints if it is still the one on screen.
+  const hideAll = el('button', 'btn ghost', 'Hide all');
+  hideAll.title = 'Untick every column, then tick only the ones you want';
+  const paintTicks = () => {
+    for (const [name, cb] of ticks) cb.checked = !(S.layout[name] || {}).hidden;
+    paintCount(); changed();
+  };
+  hideAll.onclick = () => {
+    hideAllColumns({ onUndo: () => { if (container.isConnected) paintTicks(); } });
+    paintTicks();
+  };
+  const empty = el('button', 'btn ghost', 'Hide empty columns');
+  empty.onclick = async () => {
     // Hide columns with no value in the first 2000 rows of the current view.
     const sample = await api(`/api/rows?view_id=${S.view.view_id}&start=0&count=2000`);
     S.columns.forEach((c, i) => {
@@ -1013,7 +1031,7 @@ export function buildColumnsPanel(container, refresh = () => openTableMenu()) {
   dockBtn.type = 'button';
   dockBtn.title = 'Keep this column list on screen at the bottom of the sidebar, for whichever table is open';
   dockBtn.onclick = () => pinFromTableMenu();
-  acts.append(all, none, hideRows, hideDupes, dockBtn);
+  acts.append(all, hideAll, empty, hideRows, hideDupes, dockBtn);
   container.append(acts);
   paintDockToggles();
 }

@@ -7,11 +7,12 @@
    next to the user, hide the payload") wants the list on screen beside
    the grid, the way EDR and SIEM consoles keep their field list. This is
    that list, docked under the table tree in the sidebar: a filter box,
-   a tick per column, drag to reorder, pin and ⤒ ⤓.
+   a tick per column, drag to reorder, pin and ⤒ ⤓, Show all and Hide all.
 
    It holds no state of its own. Every control writes S.layout / S.order
    through the same calls the table menu and the grid header use
-   (setColumnHidden, togglePin, moveColumn, setColumnOrder), and it is
+   (setColumnHidden, togglePin, moveColumn, setColumnOrder,
+   showAllColumns, hideAllColumns), and it is
    repainted FROM that state by syncColumnDock, which renderHead calls at
    its end — every layout change already ends in renderHead, so a column
    hidden from the header, pinned with Alt-click or reordered by dragging
@@ -27,7 +28,7 @@
    table menu's preference, one setting for both lists. */
 import { $, el } from './core.js';
 import { S } from './state.js';
-import { isPinned, moveColumn, setColumnHidden, setColumnOrder, showAllColumns, togglePin } from './columns.js';
+import { hideAllColumns, isPinned, moveColumn, setColumnHidden, setColumnOrder, showAllColumns, togglePin } from './columns.js';
 import { columnMeta } from './tsformat.js';
 import { loadSidebarPrefs, saveSidebarPrefs, setSidebarVisible, wireDragReorder } from './sources.js';
 import { columnsListMode, openTableMenu, saveColumnsListMode, tableMenuSeg } from './timeframe.js';
@@ -184,7 +185,21 @@ function buildDock() {
   showAll.type = 'button';
   showAll.title = 'Tick every column, so the grid shows them all';
   showAll.onclick = () => showAllColumns();
-  foot.append(el('span', 'coldock-hint', 'Drag a row to reorder'), showAll);
+  // Every box unticked, to tick back the few wanted. The rows are kept
+  // listed under Shown, as one unticked by hand is (keepListed), or the
+  // list would empty itself just when it is wanted to pick from.
+  const hideAll = el('button', 'btn ghost mb-small', 'Hide all');
+  hideAll.type = 'button';
+  hideAll.title = 'Untick every column, then tick only the ones you want';
+  hideAll.onclick = () => {
+    for (const name of dock.rows.keys()) dock.keepListed.add(name);
+    hideAllColumns();
+  };
+  // The hint gives way to the buttons at the sidebar's default width; it
+  // says the whole of itself on hover.
+  const hint = el('span', 'coldock-hint', 'Drag a row to reorder');
+  hint.title = 'Drag a row to reorder the columns';
+  foot.append(hint, showAll, hideAll);
   body.append(top, scroller, foot);
 
   const empty = el('div', 'coldock-empty', 'Open a table to list its columns here.');

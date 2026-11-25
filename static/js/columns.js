@@ -9,6 +9,7 @@ import { renderGroupStrip } from './grouping.js';
 import { histogramFollowColumns } from './histogram.js';
 import { syncColumnDock } from './columndock.js';
 import { S, clearCellSelection, gridRowCount, selClear, selSetAll, selSnapshot } from './state.js';
+import { plural } from './tables.js';
 import { baseColumns, columnMeta, shownTsLength } from './tsformat.js';
 import { anchoredPanel, contextMenu } from './ui.js';
 import { rebuildSoon, rebuildView, syncDuplicateRows } from './view.js';
@@ -118,6 +119,35 @@ export function showAllColumns() {
   renderHead();
   render();
   saveLayout();
+}
+
+/* Every column off the grid: both lists' Hide all, for "start from
+   nothing and tick the five I want" on a table with two hundred. A
+   grouped column is left as it is: it is in the group strip, not the
+   grid, and `hidden` is never set on one (Hide duplicate rows still
+   compares it; docs/notes/ui.md). The set this replaces may have taken
+   a while to choose and Show all does not bring it back, so the toast
+   offers Undo, as replaceLayout's does; `onUndo` lets a list that does
+   not repaint from S (the table menu's) catch up. Returns the columns
+   it hid, none when the grid already showed none. */
+export function hideAllColumns({ onUndo = null } = {}) {
+  const id = S.sourceId;
+  const listed = S.order.filter((n) => !S.groupByCols.includes(n));
+  const was = listed.filter((n) => !(S.layout[n] || {}).hidden);
+  if (!was.length) return was;
+  for (const n of listed) S.layout[n] = { ...(S.layout[n] || {}), hidden: true };
+  renderHead();
+  render();
+  saveLayout();
+  toastAction(`Hid all ${plural(listed.length, 'column')}`, 'Undo', () => {
+    if (S.sourceId !== id) return;
+    for (const n of was) if (S.order.includes(n)) S.layout[n] = { ...(S.layout[n] || {}), hidden: false };
+    renderHead();
+    render();
+    saveLayout();
+    if (onUndo) onUndo();
+  });
+  return was;
 }
 
 /* A whole new order, from a dropped row in either list. */
