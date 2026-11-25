@@ -498,6 +498,17 @@ search works or not.
   a rare CI failure into roughly one run in eight, and record what each
   build and landing did in a `window` array to read back on failure.
 
+- **Shrink only the fuse a test is about.** A server spawned with
+  `WINNOW_NEVER_CONNECTED_EXIT_S` cut to seconds starts spending it when
+  the module loads, before the test can reach the port; on a Windows
+  runner, startup plus `spawn_server`'s readiness probe (a refused
+  connect there takes about a second to fail) ran past 3s, and
+  test_idle_shutdown.py's dropped-stream test exited as "no browser ever
+  connected" before its stream opened. The tests that connect now leave
+  that fuse long and only the two about it shorten it. Reproduce this
+  kind of failure by delaying startup and the probe rather than by
+  waiting for a slow runner.
+
 - **Two imports queued together finish in either order**, so the tables'
   ids come out in either order too. A test that compares sorted pairs of
   `(source_id, rid)` against a list written in name order passes only
