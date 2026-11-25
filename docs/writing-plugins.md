@@ -740,13 +740,36 @@ field.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDe
 | `'-'` | A rule between groups of entries |
 | `{ header }` | A small section label, uppercased; `literal: true` keeps it as typed, in mono, for a value such as a column name or a path |
 
-Other keys the app's own menus use are not part of this contract. The
-menu does not move the focus when it opens, and does not put it back when
-it closes — true of every menu in the app. If picking an entry re-renders
-the element that opened it, a keyboard user's focus lands on `<body>`:
-focus the new node yourself when the menu was opened from the keyboard,
-as the bundled [`pivot/`](../examples/plugins/pivot/) and
+Other keys the app's own menus use are not part of this contract. A
+menu of five entries or fewer does not move the focus when it opens, and
+does not put it back when it closes — true of every such menu in the app.
+One with **more than five** pickable entries opens with a search box at
+its top and the focus in it: typing narrows the entries (headers follow
+what is left under them), Enter picks the first one left, Down steps into
+the entries, and Escape closes the menu and puts the focus back on
+`anchor`. You don't opt in; it is the same rule as every menu in Winnow.
+Either way, if picking an entry re-renders the element that opened it, a
+keyboard user's focus lands on `<body>`: focus the new node yourself when
+the menu was opened from the keyboard, as the bundled
+[`pivot/`](../examples/plugins/pivot/) and
 [`first_last/`](../examples/plugins/first_last/) field lists do.
+
+### Drop-down lists
+
+A plain `<select>` in your tab, panel or dashboard is already the app's:
+the themed base rule styles it, and once it holds more than five options
+a press on it (or Alt+↓, F4, Space or a typed letter while it has the
+focus) opens Winnow's searchable list instead of the browser's. The
+select itself is untouched. Read `.value` and listen for `change` as
+usual: picking from the list sets the select and fires `input` and
+`change` on it, only when the value changed. Two attributes adjust it:
+
+| Attribute | Effect |
+| --- | --- |
+| `data-search="off"` | Keep the browser's own list, however long |
+| `data-search="on"` | Searchable however short |
+
+A list box (`multiple`, or `size` above 1) is left alone.
 
 ### Dialogs with sections
 

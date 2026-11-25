@@ -106,6 +106,57 @@ see [docs/notes/README.md](README.md) for the whole set.
   compares the open list's painted colors with the skin's tokens on every
   skin in both themes.
 
+- **A drop-down list of more than five options is searchable, app-wide,
+  without its caller knowing** (static/js/selectsearch.js). Asked for
+  because the Add derived column dialog's Parse column, Format and
+  lookup-column lists run to dozens of entries, and the browser's own list
+  can only jump to the first option STARTING with a typed letter. One
+  window-level, capture-phase listener per event takes over the gesture
+  that opens the native list (a mousedown on the select; Alt+↓, F4,
+  Space or a printable key on a focused one) and draws a `.menu` with a
+  search box instead. The `<select>` stays exactly what it was, so the
+  ~45 call sites, the plugins, `select_option` in the tests and every
+  contextual style rule are untouched; a pick sets `selectedIndex` and
+  fires `input` and `change`, only when the value changed, as the native
+  list does. Things that matter if you touch it:
+  - **The list is appended to `<body>`, not beside the select.** Beside
+    it, a select inside its `<label>` (most of them: `labeledRow`, the
+    derived params) would have every click on the list's padding
+    forwarded to the select, and a transformed ancestor would make
+    `position: fixed` relative to that ancestor.
+  - **Being outside the select's container is why the listeners are on
+    window in the capture phase.** A select inside an open anchoredPanel
+    or menu (`openMenuEl`) would otherwise have its panel closed by
+    `onMenuOutsideClick` the moment the analyst pressed an option, and an
+    Escape in the search box would reach `onMenuKeydown` and the app's
+    Escape handler, closing the dialog under the list. Window capture
+    runs before both; a press inside the list stops there, and every key
+    while the list is up is the list's. Opening it also leaves an open
+    `openMenuEl` up when the select lives inside it.
+  - **Five is counted over visible options** (`hidden` ones, and those in
+    a hidden optgroup, are not offered). `data-search="off"` keeps the
+    native list and `"on"` forces the search; a list box (`multiple`,
+    `size` > 1) is never touched.
+  - **Opening upward fixes the list's height**: its bottom edge is held to
+    the select, so a list that shrank with each keystroke would drag the
+    search box down under the caret.
+  - **Matching** is every whitespace-separated word as a substring of the
+    option's label, its optgroup's label, and its value with underscores
+    as spaces, unless the value is all digits (a table id would match "1"
+    everywhere). The order is the select's own, never re-ranked.
+
+- **A drop-down menu of more than five items has a search box**
+  (`menuFinder`, ui.js), the same rule for `dropdownMenu` (button
+  anchored, plugins' included) — never for `contextMenu`, whose open menu
+  is where the tag hotkeys are pressed. The box is the menu's first
+  child and `fillMenuNode` keeps it across a repaint (removing it would
+  drop the focus and what was typed); `refresh()` re-applies the filter
+  after one. It takes the focus on open, so Escape gives the focus back
+  to the anchor (only for a menu that has one: a menu that never took the
+  focus never moved it). `focusableIn` skips hidden items so ↓ from the
+  box lands on the first one left, and `onMenuKeydown` leaves ←/→ to the
+  box's caret.
+
 - **Bar buttons never wrap their label.** `.toolbar .btn`, `.sql-head .btn`,
   `.detail-head .btn`, `.dash-bar .btn` and `.wl-head .btn` are
   `white-space: nowrap; flex: 0 0 auto`. Under width pressure (tag counts,
