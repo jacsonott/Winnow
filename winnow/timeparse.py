@@ -295,7 +295,10 @@ def register_op(op: dict) -> None:
     # params, state)` gets them in op_inputs() order: the input column
     # first, then whatever the op's `column`/`columns` params name — and
     # the store puts those names in state["inputs"], same order, for an
-    # op whose output names its inputs (row_json). An op written against
+    # op whose output names its inputs (row_json), and their types on the
+    # table being derived in state["input_types"] ('datetime', 'number',
+    # 'text'; None for one the table lacks), for an op whose output
+    # depends on them (coalesce over timestamps). An op written against
     # the older parse_pair(a, b, params) is wrapped here, so the store has
     # exactly one multi-column calling convention.
     op.setdefault("parse_multi", None)
@@ -1196,6 +1199,98 @@ register_op({
     "params": [_UTC_OFFSET_PARAM],
     "parse": _parse_dmy,
 })
+
+
+# ------------------------------------------- a datetime column's value, canonical
+#
+# What a value of a DATETIME column says, written the way every derived
+# datetime column holds one. An imported column is typed datetime when its
+# values are in any of four families (store.py's DATE_RE): ISO, US
+# month-first with slashes, day-first with dashes and month names, each in
+# its own writing. The grid reads all four (tsformat.js's parseTimestamp)
+# and shows them in one format, and sort and the timeframe filter compare
+# them through TS_NORMALIZE, so two such columns look and behave alike
+# however each was stored. A derived column is different: every reader of
+# one takes its values as canonical, so a coalesce of two datetime columns
+# has to write them canonical to be one (combine.py).
+#
+# The four families as the grid reads them, a fraction captured too and
+# kept as written (EvtxECmd writes seven digits): the separator between
+# date and time is DATE_TIME_SEP, the hour may be one digit, and the
+# seconds and the time itself are optional, midnight when there is none.
+_FRACTION = r"(?:[.,](\d+))?"
+_CLOCK = r"(\d{1,2}):(\d{2})(?::(\d{2})" + _FRACTION + r")?"
+_COLUMN_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:" + DATE_TIME_SEP + _CLOCK + r")?")
+_COLUMN_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})(?:" + DATE_TIME_SEP + _CLOCK
+                           + r"\s*(?:" + MERIDIEM + r")?)?")
+_COLUMN_DMY_RE = re.compile(r"^" + DMY_DATE + r"(?:" + DATE_TIME_SEP + _CLOCK
+                            + r"\s*(?:" + MERIDIEM + r")?)?")
+_COLUMN_MONTH_RE = re.compile(
+    r"^(?:(" + MONTH_NAME + r")\s+(\d{1,2})" + ORDINAL + r"|(\d{1,2})" + ORDINAL + r"\s+(" + MONTH_NAME + r"))"
+    r"\s*,?\s*(\d{4})(?:" + DATE_TIME_SEP + _CLOCK + r"\s*(?:" + MERIDIEM + r")?)?",
+    re.IGNORECASE)
+
+
+def _column_parts(s: str) -> tuple[tuple, str, int] | None:
+    """((y, mo, d, h, mi, sec, meridiem), fraction digits, end) for a value
+    in one of the four families, tried in parseTimestamp's order; None for
+    anything else."""
+    m = _COLUMN_ISO_RE.match(s)
+    if m:
+        y, mo, d, h, mi, sec, frac = m.groups()
+        return (y, mo, d, h, mi, sec, None), frac or "", m.end()
+    m = _COLUMN_US_RE.match(s)
+    if m:
+        mo, d, y, h, mi, sec, frac, ampm = m.groups()
+        return (y, mo, d, h, mi, sec, ampm), frac or "", m.end()
+    m = _COLUMN_DMY_RE.match(s)
+    if m:
+        d, mo, y, h, mi, sec, frac, ampm = m.groups()
+        return (y, mo, d, h, mi, sec, ampm), frac or "", m.end()
+    m = _COLUMN_MONTH_RE.match(s)
+    if m:
+        name1, d1, d2, name2, y, h, mi, sec, frac, ampm = m.groups()
+        mo = MONTHS[(name1 or name2)[:3].lower()]
+        return (y, mo, d1 or d2, h, mi, sec, ampm), frac or "", m.end()
+    return None
+
+
+def canonical_timestamp(value: Any) -> str | None:
+    """A datetime column's value as "YYYY-MM-DD HH:MM:SS", then ".digits"
+    when it had a fraction (as written: neither padded nor cut), or None
+    when it is not a time the grid would show as one.
+
+    The date and time are the ones the grid shows for the value in any
+    timestamp format. A zone after it is applied as the datetime ops apply
+    one (_trailing_zone): Z, UTC, GMT and an offset such as +02:00 are
+    converted to UTC, and one that can't be (EST, Europe/Paris) makes the
+    value one this does not read, since keeping the wall-clock time would
+    put it hours off among the others. Whole minutes, so the fraction is
+    the same in UTC. A date the calendar does not have (2024-02-30) is not
+    read either: SQLite's date functions, which the histogram and the
+    Timeline use, would answer NULL for it."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    got = _column_parts(s)
+    if got is None:
+        return None
+    (y, mo, d, h, mi, sec, ampm), frac, end = got
+    try:
+        dt = datetime(int(y), int(mo), int(d), hour24(int(h or 0), ampm), int(mi or 0), int(sec or 0))
+    except ValueError:
+        return None
+    named, off = _trailing_zone(s[end:])
+    if named:
+        if off is None:
+            return None
+        try:
+            dt -= off
+        except OverflowError:
+            return None
+    out = (f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d} "
+           f"{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}")
+    return f"{out}.{frac}" if frac else out
 
 
 # ----------------------------------------------------------- duration delta

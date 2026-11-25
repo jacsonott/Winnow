@@ -745,6 +745,44 @@ see [docs/notes/README.md](README.md) for the whole set.
   ('empty' members say nothing, as for numbers). Existing columns typed
   'text' before this keep it until a pass rewrites them; only NULL is
   looked at on open.
+- **A coalesce over datetime columns WRITES canonical, so the rule above
+  holds whatever each input stores** (`combine._coalesce`,
+  `timeparse.canonical_timestamp`, `Store._multi_input_state`). The rule
+  above alone made the coalesce a datetime column only when every table
+  happened to store `YYYY-MM-DD HH:MM:SS`. An ISO stamp with a `T` and a
+  `Z` in one table and a US date in the other look alike in the grid
+  (every datetime column is shown in the case's format, and sorted
+  through TS_NORMALIZE), so the analyst saw two timestamp columns in one
+  format combine into a text column showing two shapes as stored. Typing
+  the column datetime anyway is not the fix, for the reason above: every
+  reader of a derived datetime column compares it as stored. So the op
+  changes what it writes instead, and only when every input the table
+  HAS is a datetime column; a text column among them keeps the old
+  copy-as-stored. The op learns its inputs' types from
+  `state["input_types"]`, which the backfill and both previews build in
+  `_multi_input_state` from the table being derived: per member on a
+  merge, as each member's backfill reads it, so a member with only
+  TimeCreated and one with only Created0x10 are each all-datetime (a
+  lacked input is None and says nothing). The merge preview used to share
+  one state across members; it now layers each member's types over one
+  `prepare`.
+  `canonical_timestamp` reads the four families DATE_RE types a column
+  by, the way tsformat.js's parseTimestamp reads them for display (so the
+  time written is the time the grid showed), and keeps the fraction AS
+  WRITTEN rather than `_fmt`'s six digits: EvtxECmd's seven survive, and
+  fractions of any length sort right as text. Unlike the grid it applies
+  a zone (`_trailing_zone`, as the datetime ops do): an offset is
+  converted to UTC, whole minutes so the fraction is unchanged, and a
+  named zone it can't convert (EST) is not read, since the wall-clock
+  time would sit hours off among UTC ones. A date the calendar lacks is
+  not read either (SQLite's date functions would answer NULL for it in
+  the histogram and the Timeline). An input value that doesn't read is
+  passed over like a blank, so the next column's time wins; a row with
+  something in it and no time anywhere is NULL, which `_had_input_sql`
+  counts as unparsed, as a timestamp parse's failure. A column made
+  before this holds the stored text until a Re-derive.
+  tests/test_derived_coalesce_timestamps.py,
+  tests/ui/test_coalesce_timestamp_shapes_ui.py.
 - **That open-time typing runs on a thread, never inside `Store()`.**
   It shipped inline at the end of `__init__`, under the writer lock, and
   one number column is a full scan — so a case with a few million rows

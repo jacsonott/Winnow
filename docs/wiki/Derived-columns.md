@@ -45,14 +45,30 @@ Things to know before you rely on one:
   value in it is written `YYYY-MM-DD HH:MM:SS`, with or without a
   fraction of a second after it (`2024-01-05 13:25:21.1234567`). That is
   how EvtxECmd, MFTECmd and the other EZ Tools write times, and how every
-  derived timestamp is written. So **First non-empty value** over two
-  such columns gives a column you can sort by time, choose in the
-  timeframe filter, the histogram and the Timeline, and show in any
-  timestamp format. One value in another shape (a `T` between the date
-  and the time, a time zone after it, a US date, a `-`) keeps the column
-  text; derive a timestamp from it with **Parse a timestamp** to get a
-  datetime column. On a merged table the column is a datetime column when
-  no member table's copy holds anything else.
+  derived timestamp is written. One value in another shape (a `T` between
+  the date and the time, a time zone after it, a US date, a `-`) keeps
+  the column text; derive a timestamp from it with **Parse a timestamp**
+  to get a datetime column. On a merged table the column is a datetime
+  column when no member table's copy holds anything else.
+- **First non-empty value over datetime columns is a datetime column,**
+  whatever format each of them stores its times in. Two timestamp
+  columns can look the same in the grid, since every datetime column is
+  shown in the case's timestamp format, while one table stores
+  `2024-01-05T13:25:21Z` and the other `1/5/2024 1:25:21 PM`. When every
+  column it reads is a datetime column, **First non-empty value** writes
+  each time as `YYYY-MM-DD HH:MM:SS`, keeping any fraction of a second,
+  so both of those come out as `2024-01-05 13:25:21`. The result sorts by
+  time, can be chosen in the timeframe filter, the histogram and the
+  Timeline, and is shown in the same timestamp format as the columns it
+  came from. A time written with an offset, such as `+02:00`, is
+  converted to UTC, as **Parse a timestamp** converts one; a zone written
+  as a name (`EST`, `Europe/Paris`) can't be converted, so that value
+  isn't read. A value that isn't a time (`-`, `N/A`) is passed over like
+  a blank one, and a row that has something in one of the columns but no
+  time in any of them is left empty and counted as unparsed. When any of
+  the columns isn't a datetime column, every value is copied as stored.
+  A column made this way with an earlier version of Winnow holds the
+  values as stored until you **Re-derive…** it.
 - **It doesn't change what the table is.** Saved filters,
   [Timeline configurations](Timeline-search-and-watchlist.md#choosing-the-timestamp-type-and-body)
   and merging are matched on the file's own columns, so adding a derived
@@ -539,7 +555,7 @@ derive **Base64 decode** from that column.
 
 | Operation | What it does | Example |
 | --- | --- | --- |
-| **First non-empty value** | The **Parse column**, then each column under **Then try**, in order; the first that isn't blank wins. All blank stays blank. On a merged table the columns can each be in different tables (see [Derived columns on merged tables](#derived-columns-on-merged-tables)) | `SubjectUserName` blank, then `TargetUserName` = `alice` → `alice` |
+| **First non-empty value** | The **Parse column**, then each column under **Then try**, in order; the first that isn't blank wins. All blank stays blank. When every column is a datetime column, the first time wins and the result is a datetime column, whatever format each column stores its times in (see [What a derived column is](#what-a-derived-column-is)). On a merged table the columns can each be in different tables (see [Derived columns on merged tables](#derived-columns-on-merged-tables)) | `SubjectUserName` blank, then `TargetUserName` = `alice` → `alice`; `TimeCreated` blank, then `Timestamp` = `1/5/2024 1:25:21 PM` → `2024-01-05 13:25:21` |
 | **Row as JSON** | The **Parse column** plus the listed **Columns** as one compact JSON object per row, for pasting into a ticket or a note. Every other column starts listed; remove what you don't want. **Skip empty cells** leaves blanks out | `{"Host":"WS01","EventId":4624,"Code":"007"}` |
 
 In **Row as JSON**, a cell is written as a bare number only when that
@@ -633,8 +649,12 @@ just as the merge shows that table's rows. This is what makes
 EvtxECmd's `TimeCreated` in one table and MFTECmd's `Created0x10` in
 another, **First non-empty value** of `TimeCreated` then `Created0x10`
 gives one **When** column that holds each row's own time, and a datetime
-column that sorts both tables' rows together (see
-[What a derived column is](#what-a-derived-column-is)).
+column that sorts both tables' rows together. The tables don't have to
+store their times the same way: a table of ISO times with a `Z` and one
+of US dates combine into one datetime column too (see
+[What a derived column is](#what-a-derived-column-is)). Each table is
+judged on the columns it has, so a table with only `TimeCreated` and one
+with only `Created0x10` both count as all datetime columns.
 A table that has none of the columns gets an empty column, which is not
 counted as unparsed. The merge's **From table** column can't be derived
 from, since none of the tables holds it.
