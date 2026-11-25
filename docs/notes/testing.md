@@ -353,6 +353,15 @@ nothing lost, no path offered, and the value never built as markup.
 `test_popout.py` brings a pop-out back as a tab (and keeps what was typed
 out there), and opens a pop-out with no case, and one of a page the case
 doesn't have, through `window.open('')` so the window may close itself.
+It also pops a page out while the main window has four SQL runs out that
+never end on their own: the browser's six connections to the server are
+shared by every window, so the pop-out loads only because it holds no
+presence stream of its own (docs/notes/ui.md); on develop it never did.
+The runs are stopped through `server_post`, from outside the browser,
+which has no connection to spare for it. `test_dashcache.py` holds a
+board's widget previews with `page.route` and counts what goes out: no
+more than `TURN_SLOTS` at once, one more as each answers, and nothing
+more from a board once another one opens.
 `test_skin_contrast.py` takes the WCAG contrast ratio of text on its
 background in every skin and theme, resolved in the page (tokens can be
 `color-mix()` or carry alpha). `--text` is held to 4.5:1 on every surface

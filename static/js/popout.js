@@ -12,9 +12,14 @@
    would every document-level listener a plugin adds.
 
    The server needs nothing new for it. Any number of windows on one case
-   was already safe — per-window presence, the case token on every request
-   (docs/notes/server.md) — so a pop-out is just another window. What it
-   adds is in the browser, and it comes down to four rules:
+   was already safe — the case token on every request (docs/notes/
+   server.md) — so a pop-out is just another window, with one difference:
+   it holds no presence stream. The browser gives every window of the
+   profile six connections to the server between them, and a stream keeps
+   one for as long as its window is open, so the main window hears the
+   server for its pop-outs and passes on what it says (relayPresence,
+   connection.js hearPresence). What a pop-out adds is in the browser, and
+   it comes down to four rules:
 
    - ONE LIVE COPY. While a page is out, the main window never mounts it:
      its tab shows #popoutPlaceholder instead (pageElsewhere, at the top of
@@ -52,6 +57,7 @@
    goodbye is noticed. */
 import { $, api, el, onMutation, toast } from './core.js';
 import { renderHeadResized } from './columns.js';
+import { hearPresence } from './connection.js';
 import { drillInto, markDashboardStale, showDashboard } from './dashboard.js';
 import { render } from './grid.js';
 import { drawRail, regroupIfGroupedByTag } from './grouping.js';
@@ -159,8 +165,23 @@ function send(msg) {
 /* Whether a page is out in a pop-out of this window. */
 export function isPoppedOut(key) { return popped.has(key); }
 
-/* This window's pop-outs — what Shut down leaves out of "other windows". */
-export function ownPopoutCount() { return inPopout() ? 0 : popped.size; }
+/* This window's pop-outs that the server counts as windows of their own —
+   what Shut down leaves out of "other windows". None, wherever there is a
+   channel to hear the main window's presence stream on (hearsMainPresence). */
+export function ownPopoutCount() { return inPopout() || channel ? 0 : popped.size; }
+
+/* A pop-out holds no presence stream of its own: its main window passes on
+   what the server says over that window's stream (relayPresence), and
+   connection.js hearPresence acts on it here as it does there. Only
+   without a channel to hear it on does a pop-out open its own. */
+export function hearsMainPresence() { return inPopout() && !!channel; }
+
+/* The main window: what its presence stream just said, for its pop-outs.
+   Every event, not only those this window acts on — a case switch this
+   window made itself is news to them. */
+export function relayPresence(kind, data) {
+  if (!inPopout()) send({ type: 'presence', kind, data });
+}
 
 /* ------------------------------------------------------ the main window */
 
@@ -635,6 +656,8 @@ function onMessage(e) {
       ownerGone = setTimeout(ownerClosed, OWNER_GRACE_MS);
     } else if (m.type === 'dock-request' && m.key === ownKey) {
       dock();
+    } else if (m.type === 'presence') {
+      hearPresence(m.kind, m.data);
     }
     return;
   }

@@ -13,7 +13,7 @@
    stream drops when the server goes (even if nobody clicks anything), and
    a failed request proves it (even if the stream is mid-retry). */
 import { $, api, el, noticeServerCase, onCaseChanged, onConnectionChange, setCaseToken } from './core.js';
-import { followCaseSwitch, inPopout } from './popout.js';
+import { followCaseSwitch, hearsMainPresence, inPopout, relayPresence } from './popout.js';
 
 // EventSource reconnects by itself every few seconds, so a single error is
 // usually a blip — a restart, a proxy hiccup. Wait before crying wolf.
@@ -218,6 +218,34 @@ function caseGone(now) {
   reload.focus();
 }
 
+/* What the presence stream said, acted on: by the window whose stream it
+   is, and by each of its pop-outs, which hear it from that window
+   (popout.js relayPresence) rather than holding a stream of their own.
+
+   That is not tidiness. A browser opens at most six connections to one
+   server, shared by every window of the profile, and a presence stream
+   holds one for as long as its window is open. With a stream each, the
+   main window and three pop-outs held four of the six, and a new pop-out
+   loaded its 70-odd scripts and first requests through the other two,
+   behind whatever the rest of the app had asked for (core.js inTurn).
+   A pop-out cannot outlive its main window, whose stream already tells
+   the server a browser is attached, so it never needed one. */
+export function hearPresence(kind, data) {
+  if (kind === 'shutdown') onShutdown();
+  else if (kind === 'restart') awaitRestart(data);
+  else if (kind === 'case') {
+    let now;
+    try { now = JSON.parse(data); } catch { return; }
+    noticeServerCase(now && now.token ? now : null);
+  } else if (kind === 'open') hide();
+  else if (kind === 'lost') show();
+}
+
+function presence(kind, data) {
+  hearPresence(kind, data);
+  relayPresence(kind, data);
+}
+
 export function wireConnection() {
   // A request answered after the server said it was going is one it
   // finished on the way down, not a sign it is back; a stream that
@@ -227,26 +255,25 @@ export function wireConnection() {
     else if (!shutDown) hide();
   });
   onCaseChanged(caseGone);
+  // No stream, so no goodbye either: the server has nothing of this
+  // window's to match one to.
+  if (hearsMainPresence()) return null;
   window.addEventListener('pagehide', sayGoodbye);
   stream = new EventSource(`/api/presence?page=${PAGE_ID}`);
-  stream.addEventListener('shutdown', onShutdown);
-  stream.addEventListener('restart', (e) => awaitRestart(e.data));
+  stream.addEventListener('shutdown', () => presence('shutdown'));
+  stream.addEventListener('restart', (e) => presence('restart', e.data));
   // Which case the server has open: said when the stream opens (so a
   // reconnect to a server restarted on another case is caught at once)
   // and whenever another window switches it.
-  stream.addEventListener('case', (e) => {
-    let now;
-    try { now = JSON.parse(e.data); } catch { return; }
-    noticeServerCase(now && now.token ? now : null);
-  });
-  stream.onopen = hide;
+  stream.addEventListener('case', (e) => presence('case', e.data));
+  stream.onopen = () => presence('open');
   stream.onerror = () => {
     // readyState CLOSED means it gave up; CONNECTING means it is retrying,
     // and the server may simply be restarting — give that a moment.
     if (down || pending) return;
     pending = setTimeout(() => {
       pending = null;
-      if (!stream || stream.readyState !== EventSource.OPEN) show();
+      if (!stream || stream.readyState !== EventSource.OPEN) presence('lost');
     }, GRACE_MS);
   };
   return stream;

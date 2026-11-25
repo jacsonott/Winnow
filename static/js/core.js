@@ -263,6 +263,85 @@ export async function api(path, opts) {
 export const post = (path, body, { signal, keepalive } = {}) =>
   api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal, keepalive });
 
+/* Long requests that come in a batch take turns: at most TURN_SLOTS of
+   them out at once, across every window on this Winnow.
+
+   A browser opens at most six connections to one server (uvicorn speaks
+   HTTP/1.1, which can't share one between requests), and those six are
+   shared by every window of the browser profile: the main window, each
+   of its pop-outs, a second main window on the same Winnow. The main
+   window's presence stream (connection.js) holds one of them for good. A
+   board opening 26 widgets with nothing cached used to put 26 queries in
+   the browser's queue at once: five ran, and everything any window asked
+   for after them waited behind the other 21, in order. A page popped out
+   then sat blank until the board was done, 30-60 s on a large case
+   (measured, docs/notes/ui.md), and so did the grid's rows and a tag
+   written in the meantime.
+
+   Here the rest of the batch waits in the page instead of in the
+   browser's queue, which leaves connections free for whatever anyone
+   clicks next. The slots are Web Locks, which every window on the origin
+   shares, as it shares the six connections. A page that has none (a
+   server reached over plain http from another machine is not a secure
+   context) takes turns within itself. */
+export const TURN_SLOTS = 3;
+
+let localTurnsOut = 0;
+const localTurnQueue = [];
+
+function localTurn() {
+  return new Promise((granted) => {
+    const start = () => {
+      localTurnsOut += 1;
+      let done = false;
+      granted(() => {
+        if (done) return;
+        done = true;
+        localTurnsOut -= 1;
+        const next = localTurnQueue.shift();
+        if (next) next();
+      });
+    };
+    if (localTurnsOut < TURN_SLOTS) start();
+    else localTurnQueue.push(start);
+  });
+}
+
+/* One of TURN_SLOTS named locks, whichever frees first: a place in every
+   slot's line, withdrawn from the others once one is granted. Resolves
+   with the function that gives the slot back. */
+function sharedTurn() {
+  return new Promise((granted, refused) => {
+    const ctl = new AbortController();
+    let won = false;
+    let failures = 0;
+    for (let i = 0; i < TURN_SLOTS; i += 1) {
+      navigator.locks.request(`winnow.turn.${i}`, { signal: ctl.signal }, () => {
+        // Two slots can free in the same moment; the second one granted
+        // goes straight back.
+        if (won) return undefined;
+        won = true;
+        ctl.abort();
+        return new Promise((release) => granted(release));
+      }).catch((e) => {
+        if (e && e.name === 'AbortError') return;
+        failures += 1;
+        if (failures === TURN_SLOTS) refused(e);
+      });
+    }
+  });
+}
+
+export async function inTurn(fn) {
+  let release;
+  try {
+    release = await (navigator.locks ? sharedTurn() : localTurn());
+  } catch {
+    release = await localTurn();
+  }
+  try { return await fn(); } finally { release(); }
+}
+
 /* Thin top-of-viewport progress indicator for anything that can take a
    real amount of time on a large source (a view rebuild — filter/sort/
    search — is the one that matters most; scroll paging is deliberately left

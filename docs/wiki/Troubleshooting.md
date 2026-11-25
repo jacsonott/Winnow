@@ -225,6 +225,16 @@ index. Search still works at scanning speed. Check the version with:
 python -c "import sqlite3; print(sqlite3.sqlite_version)"
 ```
 
+### A window is slow to show anything while queries run
+
+The browser opens at most six connections to Winnow, and every Winnow
+window shares them. The main window always keeps one, a dashboard that is
+running uses up to three, and each long SQL query keeps one until it
+finishes. When long queries fill the rest, anything else waits for one of
+them to end, including a page you open in its own window. Stop a query you
+no longer need ([Stopping a runaway query](SQL-pane.md#stopping-a-runaway-query)),
+or let it finish.
+
 ### Dragging a file in shows a no-entry cursor
 
 Winnow takes any file dragged onto its window. When the pointer turns into
