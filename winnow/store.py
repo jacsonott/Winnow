@@ -8857,16 +8857,24 @@ class Store:
         on the member that lacks it, never one member's header read as the
         other's data.
 
-        Derived columns keep their older, stricter rule: exposed only when
-        present on ALL members under the same name, each read from its own
-        drv_ sidecar. The source column, when on, comes first."""
+        Derived columns follow the same rule, after the file columns and
+        matched by name among derived columns only: 'all' shows one any
+        member has, empty in the rows of the members without it, and
+        'shared' only one every member has. Each member reads its own
+        drv_ sidecar. A derived column named like a file column of the
+        merge is not shown: the file column is (_member_column). They used
+        to need every member whatever the mode, which hid a column derived
+        on one table from every merge it was in. The source column, when
+        on, comes first."""
         seen: dict[str, dict] = {}
         counts: dict[str, int] = {}
+        derived: dict[str, list[dict]] = {}
         for m in members:
             for c in m["columns"]:
-                if c.get("derived"):
-                    continue
                 k = _col_key(c["name"])
+                if c.get("derived"):
+                    derived.setdefault(k, []).append(m)
+                    continue
                 if k not in seen:
                     seen[k] = c
                 counts[k] = counts.get(k, 0) + 1
@@ -8874,23 +8882,26 @@ class Store:
         if row["col_mode"] == "shared":
             keys = [k for k in keys if counts[k] == len(members)]
         cols = [seen[k] for k in keys]
-        taken = set(keys)
-        for c in members[0]["columns"]:
-            if not c.get("derived") or _col_key(c["name"]) in taken:
+        # A file column's name, shown or not, is never a derived column's
+        # too: the members with the file column would read it as NULL
+        # (_member_column).
+        taken = set(seen)
+        for k, holders in derived.items():
+            if k in taken:
                 continue
-            twins = [next((mc for mc in m["columns"] if mc.get("derived")
-                           and _col_key(mc["name"]) == _col_key(c["name"])), None)
-                     for m in members[1:]]
-            if any(t is None for t in twins):
+            if row["col_mode"] == "shared" and len(holders) < len(members):
                 continue
-            # One column over every member, so it says what all of them
-            # hold: still building if any member is (a re-derive on the
-            # merge runs a job per member), and the failures summed — the
-            # "Show N unparsed rows" filter it offers matches rows in every
-            # member. The id stays the first member's; the remove and
-            # re-derive routes take the merge's id beside it and act on
-            # every member's definition (_derived_scope).
-            every = [c] + twins
+            every = [next(mc for mc in m["columns"] if mc.get("derived") and _col_key(mc["name"]) == k)
+                     for m in holders]
+            c = every[0]
+            # One column over every member that has it, so it says what
+            # all of them hold: still building if any member is (a
+            # re-derive on the merge runs a job per member), and the
+            # failures summed — the "Show N unparsed rows" filter it
+            # offers matches rows in every member. The id is the first
+            # holder's; the remove and re-derive routes take the merge's
+            # id beside it and act on every member's definition
+            # (_derived_scope).
             failures = [x.get("parse_failures") for x in every]
             # Typed by every member's values, not the first member's: a
             # number on the merge only when no member holds text. A
@@ -9472,13 +9483,18 @@ class Store:
 
     def list_derived_columns(self, source_id: int) -> list[dict]:
         if source_id < 0:
-            # A merge's derived columns are the ones its column list exposes
-            # (present on every member) — represented by the first member's
-            # definitions, since that's the canonical column source.
+            # A merge's derived columns are the ones its column list exposes,
+            # each represented by the definition whose id that column
+            # carries: the first member that has it (_merge_columns), which
+            # need not be the first member at all.
             src = self._source_lite(source_id)
-            exposed = {c["name"].lower() for c in src["columns"] if c.get("derived")}
-            first = self._resolve_members(source_id)[0]["source_id"]
-            return [d for d in self.list_derived_columns(first) if d["name"].lower() in exposed]
+            ids = [c["derived_id"] for c in src["columns"] if c.get("derived")]
+            if not ids:
+                return []
+            with self._reader() as ro:
+                rows = {r["id"]: r for r in ro.execute(
+                    f"SELECT * FROM derived_columns WHERE id IN ({','.join('?' * len(ids))})", ids)}
+            return [self._derived_dict(rows[i]) for i in ids if i in rows]
         with self._reader() as ro:
             rows = ro.execute(
                 "SELECT * FROM derived_columns WHERE source_id=? ORDER BY id", (source_id,)
@@ -10856,11 +10872,19 @@ class Store:
         matters because a column made on a merge can read a column one
         member lacks (_input_ref): the merge has every input, but on that
         member's own table naming the missing one is "no such column", so
-        there it is left out — it is empty on every row anyway."""
+        there it is left out — it is empty on every row anyway.
+
+        Refused on a merge where the column is on only some tables and a
+        table without it has one of its inputs: the fragment would match
+        that table's rows too (no column of its own, so empty, beside an
+        input with something in it), and nothing a filter can say tells
+        the merge's tables apart. Open a table that has the column."""
         d = self.get_derived_column(def_id)
-        self._derived_scope(def_id, source_id)   # KeyError for a table the column isn't on
+        scope = self._derived_scope(def_id, source_id)   # KeyError for a table the column isn't on
         on = self._source_lite(source_id if source_id is not None else d["source_id"])
         inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params"))
+        if on.get("is_merge"):
+            self._check_unparsed_on_merge(on, scope, inputs)
         held = [c for c in inputs if self._find_column(on, c) is not None]
         if not held:
             return f"{q(d['name'])} IS NULL AND 1 = 0"
@@ -10868,6 +10892,23 @@ class Store:
             return f"{q(d['name'])} IS NULL AND {q(held[0])} <> ''"
         had = " OR ".join(f"TRIM(COALESCE({q(c)}, ''), ' \t\r\n') <> ''" for c in held)
         return f"{q(d['name'])} IS NULL AND ({had})"
+
+    def _check_unparsed_on_merge(self, merge_src: dict, scope: list[dict], inputs: list[str]) -> None:
+        """unparsed_where_fragment's refusal on a merge: a table of it
+        without the column (scope is the tables with it) that has one of
+        the column's inputs would match the fragment on rows that have
+        nothing to do with it."""
+        holders = {d["source_id"] for d in scope}
+        entries = [e for e in (self._find_column(merge_src, c) for c in inputs) if e is not None]
+        members = self._resolve_members(merge_src["id"])
+        if not any(m["source_id"] not in holders and any(_member_column(m["src"], e) is not None
+                                                          for e in entries)
+                   for m in members):
+            return
+        names = [m["src"].get("nickname") or m["src"]["name"] for m in members if m["source_id"] in holders]
+        which = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " or " + names[-1]
+        raise ValueError(f"{scope[0]['name']!r} is in only some of this merge's tables, so its unparsed "
+                         f"rows can't be picked out here. Open {which} to see them.")
 
     DETECT_SAMPLE = 200
 

@@ -68,15 +68,19 @@ def test_merge_spec_sql_carries_the_raw_fragment(store, write_csv):
     assert len(res["rows"]) == 2
 
 
-def test_member_only_derived_stays_invisible_to_merge_raw_sql(store, write_csv):
+def test_member_only_derived_in_merge_raw_sql(store, write_csv):
     a, _, mid = _mk(store, write_csv)
     res = store.add_derived_column(a, "OnlyA", "Msg", "regex_extract", {"pattern": "(a)"})
     store.wait_for_ingest_job(res["job_id"], timeout=30)
-    # not exposed on the merge (partial coverage) — the identifier check
-    # runs against the merge's exposed columns, so a bare reference to one
-    # member's private derived column is rejected up front.
+    # One member's derived column is the merge's (empty on the other), so
+    # a raw fragment may name it, and matches that member's rows.
+    store.validate_where_fragment(mid, "OnlyA = 'a'")
+    v = store.build_view(mid, {"source_id": mid, "filters": [], "sort": [],
+                               "filter_tree": {"type": "raw", "sql": "OnlyA = 'a'"}})
+    assert [r["source_id"] for r in store.fetch_rows(v["view_id"], 0, 100)["rows"]] == [a, a]
+    # The identifier check still runs against the merge's columns.
     with pytest.raises(ValueError, match="Unknown identifier"):
-        store.validate_where_fragment(mid, "OnlyA = 'a'")
+        store.validate_where_fragment(mid, "NotAColumn = 'a'")
 
 
 

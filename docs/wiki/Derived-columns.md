@@ -612,9 +612,15 @@ finish*.
 
 ## Derived columns on merged tables
 
-A [merged table](Working-with-tables.md) shows a derived column when every
-member table has a derived column of that name. Add one while the merge is
-open and Winnow adds it to each member table, checking all of them first,
+A [merged table](Working-with-tables.md) shows its tables' derived columns
+along with their other columns. With **Keep every column**, a column
+derived on only some of the tables is shown too, and is empty in the rows
+of the others, just like a column only some of the files have. With
+**Only shared columns**, it's shown only when every table has a derived
+column of that name. A column you derive on one table later appears in
+every merge that table is in, with no need to edit the merge.
+
+Add one while the merge is open and Winnow adds it to each member table, checking all of them first,
 so a name clash on one member stops it everywhere. One job fills it in,
 working through the member tables one after another; its row in the jobs
 panel says which table it is on, such as `User — 2/4: b.csv`. Cancelling
@@ -649,7 +655,8 @@ Two things work differently on a merge:
 - A lookup's **Lookup table** must be a real table, never a merge.
 
 **Re-derive…**, **Change the field path…**, **Rename derived column…** and
-**Remove derived column…** on a merge change every member table's copy.
+**Remove derived column…** on a merge change the copy in every member table
+that has the column, and leave the other tables alone.
 Winnow checks all of them first: if another derived column on any member
 is built from it, or the members compute it with different operations,
 nothing changes. The members are recomputed by one job, one table after
@@ -657,9 +664,15 @@ another; the merged column's ƒ
 tooltip says *building…* until all of them finish, and its **Show N unparsed rows**
 count covers every member. Cancelling that job part-way keeps the tables it
 finished, marks the one it was on *incomplete*, and leaves the rest as they
-were. **Remove derived column…** says it removes the
-column from all the tables in the merge. A rename on a merge checks the new
-name against every member table, including one without the column.
+were. **Remove derived column…** says which tables it removes the column
+from: all the tables in the merge, or the ones that have it. A rename on a
+merge checks the new name against every member table, including one
+without the column.
+
+**Show N unparsed rows** on a merge counts the tables that have the
+column. When only some tables have it and one without it has a column it
+reads, the merge can't tell that table's rows from unparsed ones, so
+Winnow says which table to open instead of filtering.
 
 ## Derived columns travel with the case
 

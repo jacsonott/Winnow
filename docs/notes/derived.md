@@ -259,10 +259,10 @@ see [docs/notes/README.md](README.md) for the whole set.
     used to group by every column, so a table with a derived column sat
     in a group of its own and the dialog said no two tables matched for
     a merge the server accepts. Each member has its own `drv_` table and
-    its own definitions; a merge exposes a derived column only where
-    every member has one of that name (`_merge_columns`), since a UNION
-    ALL across mismatched sets would need per-member NULL padding
-    nothing does yet. Editing one is its own entry below.
+    its own definitions; a merge exposes a derived column by its column
+    mode, as it does a file column (`_merge_columns`): under 'all' any
+    member's, under 'shared' only one every member has. Editing one, and
+    the column some members lack, are their own entries below.
   - **An op that reads several columns declares them as params and the
     store asks `timeparse.op_inputs(op_id, input_column, params)`** for
     the full ordered list — never `params["other_column"]` by name. The
@@ -591,6 +591,41 @@ see [docs/notes/README.md](README.md) for the whole set.
   derived column found by `_find_column`, so a derive on the merge reads
   it there. Rare enough to leave, and it was the behavior before.
   tests/test_derived_merge_partial.py, test_merge_mismatched.py.
+- **A merge shows a derived column only some of its tables have, under
+  "Keep every column"** (`_merge_columns`), empty in the others' rows,
+  as a file column only some files have is. It used to need every
+  member to have one of that name whatever the mode, so a column derived
+  on one table was missing from every merge that table was in — the
+  report was "derived columns are not being included in a merge". The
+  rule dated from before mismatched merges, when nothing could pad a
+  member's rows; `_member_projection` pads a missing derived column with
+  NULL as it does a file one, and `_member_column` (derived matches
+  derived only) is what says a member lacks it, so the read paths
+  needed nothing new. Matched by name among derived columns only, after
+  the file columns: a derived column named like ANY member's file
+  column, shown or not, is not the merge's (docs/notes/store.md's entry
+  on `_member_column` says why). Under "Only shared columns" it is
+  still every member or nothing. The column carries the FIRST HOLDER's
+  `derived_id`, which need not be members[0]'s, so
+  `list_derived_columns` on a merge reads the ids the column list
+  carries rather than the first member's definitions; `_derived_scope`
+  already took a merge's edits to the members that have the column, so
+  re-derive, rename and remove on the merge act on those and leave the
+  rest alone (the remove confirmation names them, from `members[].missing`).
+  Its type, status and failures are the holders' alone. One thing a
+  filter cannot do: **"Show N unparsed rows" on such a column** is
+  `name IS NULL AND <input> <> ''`, and on a table without the column
+  that has the input, every row with something in the input matches —
+  and no fragment can tell the merge's tables apart (no SELECT, no
+  member id; the From table column is optional). So
+  `unparsed_where_fragment` refuses there, naming the tables to open
+  (`_check_unparsed_on_merge`, a 400 from the route that the menu's
+  toast shows), and gives the fragment as before when no table without
+  the column has an input, where it is exact. The merge builder's Columns
+  tab marks a derived column DERIVED; eligibility and the fit chips stay
+  base columns only. tests/test_merge_partial_derived.py runs such a
+  column through every read path and every edit on the merge, with the
+  first member lacking it.
 - **A merge's derive is ONE job that backfills the members in turn**
   (`_backfill_derive_parts`, options `parts`: each member's def ids,
   plus `previous` on a re-derive). Create, a batch (named groups, a

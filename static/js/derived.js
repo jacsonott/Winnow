@@ -274,8 +274,23 @@ export function renameColumnIn(st, from, to) {
 export async function removeDerivedColumn(c) {
   const src = S.sources.find((x) => x.id === S.sourceId);
   const members = src && src.is_merge ? (src.member_source_ids || []).length : 0;
+  // On a merge, the tables that have it: a column derived on only some of
+  // them is shown on the merge too, and removing it there takes it off
+  // those tables alone. `missing` is what the server says each lacks.
+  const key = c.name.trim().toLowerCase();
+  const holders = members && src.members
+    ? src.members.filter((m) => !m.missing.some((n) => n.trim().toLowerCase() === key))
+    : [];
+  let where = '';
+  if (members && holders.length && holders.length < members) {
+    where = holders.length === 1
+      ? ` from ${holders[0].label}, the one table in this merge that has it`
+      : ` from the ${holders.length} tables in this merge that have it`;
+  } else if (members) {
+    where = ` from all ${members} tables in this merge`;
+  }
   const ok = await confirmDialog(
-    `Remove the derived column "${c.name}"${members ? ` from all ${members} tables in this merge` : ''}? `
+    `Remove the derived column "${c.name}"${where}? `
     + `Its values are recomputed from "${c.derived_from}", so it can be added back at any time.`,
     { okLabel: 'Remove', danger: true });
   if (!ok) return;

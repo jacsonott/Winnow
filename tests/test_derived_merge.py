@@ -1,8 +1,8 @@
 """Derived columns on merged tables: creating on the merge fans out to
-every member, the merge exposes a derived column only when EVERY member
-has one under that name (each read through its own drv_ sidecar), and
-every read path — views, filters, sort, grouping, values, export —
-resolves it per member."""
+every member, the merge exposes a derived column any member has (each
+read through its own drv_ sidecar, empty on a member without it;
+test_merge_partial_derived.py), and every read path — views, filters,
+sort, grouping, values, export — resolves it per member."""
 
 from __future__ import annotations
 
@@ -69,12 +69,22 @@ def test_merge_groups_by_the_derived_column(store, write_csv):
     assert {g["value"]: g["count"] for g in groups} == {"alice": 2, "bob": 1, "carol": 1}
 
 
-def test_partial_coverage_is_not_exposed(store, write_csv):
-    a, _, mid = _mk(store, write_csv)
+def test_partial_coverage_is_exposed_and_empty_on_the_others(store, write_csv):
+    """A column derived on one member is the merge's too, as a file column
+    only one member has is. It used to be hidden from every merge until
+    each member had one of that name."""
+    a, b, mid = _mk(store, write_csv)
     res = store.add_derived_column(a, "OnlyA", "Who", "regex_extract", RX)
     store.wait_for_ingest_job(res["job_id"], timeout=30)
+    cols = store.get_source(mid)["columns"]
+    assert [c["name"] for c in cols] == ["When", "Who", "OnlyA"]
+    v = store.build_view(mid, {"source_id": mid, "filters": [], "sort": [{"column": "When", "dir": "asc"}]})
+    assert v["row_count"] == 4
+    rows = store.fetch_rows(v["view_id"], 0, 10)["rows"]
+    assert [r["cells"][2] for r in rows] == ["alice", "bob", None, None]
+    # "Only shared columns" leaves it out, as it leaves out a file column.
+    store.update_merge(-mid, col_mode="shared")
     assert "OnlyA" not in [c["name"] for c in store.get_source(mid)["columns"]]
-    # ...and views over the merge still build fine
     assert store.build_view(mid, {"source_id": mid, "filters": [], "sort": []})["row_count"] == 4
 
 

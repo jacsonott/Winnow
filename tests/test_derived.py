@@ -295,11 +295,16 @@ def test_merge_eligibility_is_unaffected_by_derived_columns(store, write_csv):
     a = _ingest(store, write_csv, EPOCH_ROWS, name="a.csv")
     b = _ingest(store, write_csv, EPOCH_ROWS, name="b.csv")
     _add(store, a, "Timestamp", "Epoch", "unix_epoch")
+    # One member having a derived column doesn't stop the merge. Keeping
+    # every column, it shows that column as it shows a file column only
+    # some tables have (empty on b's rows: test_derived_merge.py); keeping
+    # only shared columns, it doesn't.
     merge = store.create_merge("both", [a, b])
-    # The merge itself shows base columns only — one member having a
-    # derived column can't change what the merged table looks like.
-    assert [c["name"] for c in merge["columns"]] == ["Epoch", "Host", "Msg"]
+    assert [c["name"] for c in merge["columns"]] == ["Epoch", "Host", "Msg", "Timestamp"]
     assert store.build_view(merge["id"], {})["row_count"] == 10
+    shared = store.create_merge("shared", [a, b], col_mode="shared")
+    assert [c["name"] for c in shared["columns"]] == ["Epoch", "Host", "Msg"]
+    assert store.build_view(shared["id"], {})["row_count"] == 10
 
 
 def test_derived_columns_on_a_merge_fan_out_to_every_member(store, write_csv):
