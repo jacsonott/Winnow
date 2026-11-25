@@ -11,7 +11,10 @@ pytestmark = pytest.mark.ui
 
 
 def test_archives_route_as_their_own_kind(page):
-    for name in ("esx-support.zip", "uac-host.tar.gz", "bundle.tgz", "auth.log.1.gz"):
+    # Not auth.log.1.gz, which is ONE gzipped file and reads as the secure
+    # log inside it (tests/ui/test_gzip_queue.py) — a tarball is many
+    # files, and that is what this kind is for.
+    for name in ("esx-support.zip", "uac-host.tar.gz", "bundle.tgz", "logs.tar.bz2"):
         assert page.evaluate("(n) => __winnow.importKindFor(n)", name) == "archive", name
     item = page.evaluate("() => __winnow.queueItem({ path: '/x/esx-support.zip' }, 'esx-support.zip')")
     assert item["kind"] == "archive"

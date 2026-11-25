@@ -6,7 +6,7 @@ import { $, api, debounce, dragHas, el, post, toast } from './core.js';
 import { maybeOfferAssociation } from './assoc.js';
 import { openFolderBrowser } from './home.js';
 import { DISK_FULL_STATUS, failureReason, startJobsPoll, uploadWithProgress } from './jobs.js';
-import { ARCHIVE_IMPORT_EXTENSIONS, BODYFILE_IMPORT_TYPE, IIS_FORMAT_LABELS, IIS_IMPORT_TYPE, KV_PROBE_BYTES, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SECURE_IMPORT_TYPE, SQLITE_IMPORT_EXTENSIONS, UTMP_IMPORT_TYPE, XLSX_IMPORT_EXTENSIONS, bodyfileNamed, extOf, iisLogFormat, importKindFor, kvCandidate, looksLikeBodyfile, looksLikeKvLog, looksLikeUtmp, secureLogNamed, utmpFileKind } from './merge.js';
+import { ARCHIVE_IMPORT_EXTENSIONS, BODYFILE_IMPORT_TYPE, IIS_FORMAT_LABELS, IIS_IMPORT_TYPE, KV_PROBE_BYTES, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SECURE_IMPORT_TYPE, SQLITE_IMPORT_EXTENSIONS, UTMP_IMPORT_TYPE, XLSX_IMPORT_EXTENSIONS, bodyfileNamed, extOf, gzipInner, iisLogFormat, importKindFor, importRoutingName, kvCandidate, looksLikeBodyfile, looksLikeKvLog, looksLikeUtmp, secureLogNamed, utmpFileKind } from './merge.js';
 import { renderPluginTabs, renderPluginPanelButtons } from './plugins.js';
 import { fmtBytes } from './tables.js';
 import { foldersFlattened, loadSources, renderSidebar, revealFolder } from './sources.js';
@@ -56,7 +56,10 @@ export function globMatches(pattern, name) {
    ESXi / UAC triage board, so a plugin's claim keeps them (the Read as
    switch offers the built-in reader instead; secureread.py says why). */
 export function pluginFormatFor(filename) {
-  const base = filename.split(/[\\/]/).pop();
+  // The name inside a gzipped single file, as every router reads it
+  // (importKindFor, server._ingest_kind_for_path): hostd.0.gz is the
+  // esxi_logs plugin's, as hostd.0 is.
+  const base = importRoutingName(filename.split(/[\\/]/).pop());
   const ext = extOf(base);
   if (RECOGNIZED_IMPORT_EXTENSIONS.includes(ext) || SQLITE_IMPORT_EXTENSIONS.includes(ext) || XLSX_IMPORT_EXTENSIONS.includes(ext) || PLASO_IMPORT_EXTENSIONS.includes(ext) || ARCHIVE_IMPORT_EXTENSIONS.includes(ext)) return null;
   if (iisLogFormat(base) || utmpFileKind(base) || bodyfileNamed(base)) return null;
@@ -157,8 +160,58 @@ export function queueItem(transport, name, fmt = pluginFormatFor(name), kind = i
    and refused on arrival. Unreadable here means "let the server say". */
 const BINARY_PROBE_BYTES = 8192;
 const PROBE_BYTES = Math.max(BINARY_PROBE_BYTES, KV_PROBE_BYTES);
-async function fileHead(f) {
-  try { return new Uint8Array(await f.slice(0, PROBE_BYTES).arrayBuffer()); } catch { return null; }
+/* How much of a gzipped file is read to get PROBE_BYTES out of it: text
+   compresses several times over, so this is plenty, and it is one slice
+   of a local file either way. */
+const GZIP_PROBE_BYTES = 256 * 1024;
+const GZIP_MAGIC = [0x1f, 0x8b];
+
+/* A gzip stream's first decompressed bytes, or null where this browser
+   has no DecompressionStream (native in Chromium and Firefox — nothing
+   to install, nothing to build, so the airgap rule is kept). What came
+   before a break in a damaged stream is kept: the probes want the start
+   of the file, not a verdict on the whole of it. */
+async function inflateHead(bytes, n) {
+  if (typeof DecompressionStream !== 'function') return null;
+  const out = new Uint8Array(n);
+  let len = 0;
+  const reader = new Blob([bytes]).stream()
+    .pipeThrough(new DecompressionStream('gzip')).getReader();
+  try {
+    while (len < n) {
+      const { value, done } = await reader.read();   // eslint-disable-line no-await-in-loop
+      if (done) break;
+      const take = Math.min(value.length, n - len);
+      out.set(value.subarray(0, take), len);
+      len += take;
+    }
+  } catch { /* damaged or cut short: keep what came before the break */ }
+  reader.cancel().catch(() => {});
+  return out.subarray(0, len);
+}
+
+/* What the content probes below are asked about: a file's first bytes and
+   the size they belong to — from INSIDE a gzipped file, since its own
+   bytes say nothing about the file it holds (a FortiGate log compressed
+   for mailing is still a FortiGate log, and compressed bytes are full of
+   NULs, which is "binary" to headLooksBinary). The size comes from gzip's
+   own trailer, the last four bytes of the file: login records are a whole
+   number of fixed-size records, which is how their layout is read.
+   {head: null} means "unreadable here — let the server say". */
+async function fileProbe(f) {
+  try {
+    const want = Math.max(PROBE_BYTES, GZIP_PROBE_BYTES);
+    const raw = new Uint8Array(await f.slice(0, want).arrayBuffer());
+    if (raw[0] !== GZIP_MAGIC[0] || raw[1] !== GZIP_MAGIC[1]) {
+      return { head: raw.subarray(0, PROBE_BYTES), size: f.size };
+    }
+    const head = await inflateHead(raw, PROBE_BYTES);
+    if (!head || !head.length) return { head: null, size: f.size };
+    const trailer = new Uint8Array(await f.slice(Math.max(0, f.size - 4)).arrayBuffer());
+    const stored = trailer.length === 4
+      ? new DataView(trailer.buffer, trailer.byteOffset, 4).getUint32(0, true) : 0;
+    return { head, size: stored || head.length };
+  } catch { return { head: null, size: f.size }; }
 }
 const utf16Bom = (head) => head.length >= 2 && ((head[0] === 0xFF && head[1] === 0xFE) || (head[0] === 0xFE && head[1] === 0xFF));
 function headLooksBinary(head) {
@@ -182,17 +235,18 @@ export async function queueFiles(files) {
     // A name nothing claims could be a key=value log or a body file, which
     // only its first line says (looks_like_kv_log and looks_like_bodyfile
     // server-side read the same bytes).
-    const head = kvCandidate(f.name) ? await fileHead(f) : null;
+    let probe = kvCandidate(f.name) ? await fileProbe(f) : null;
+    const head = probe && probe.head;
     const first = head ? headText(head) : '';
     let item = head && looksLikeKvLog(first) ? queueItem({ file: f }, f.name, null, 'kv')
       : head && looksLikeBodyfile(first) ? queueItem({ file: f }, f.name, null, 'bodyfile')
       : queueItem({ file: f }, f.name);
     if (item.kind === 'text') {
-      const bytes = head || await fileHead(f);
-      if (headLooksBinary(bytes)) {
+      probe = probe || await fileProbe(f);
+      if (headLooksBinary(probe.head)) {
         // A binary no name claims may be login records under another name
         // (wtmp copied out as evidence.bin): only its bytes say so.
-        if (!looksLikeUtmp(bytes, f.size)) { skipped.push(f.name); continue; }
+        if (!looksLikeUtmp(probe.head, probe.size)) { skipped.push(f.name); continue; }
         item = queueItem({ file: f }, f.name, null, 'utmp');
       }
     }
@@ -231,7 +285,10 @@ export async function queuePaths(entries) {
   if (ask.length) {
     try {
       const r = await post('/api/ingest/recognise', { paths: ask.map((e) => e.path) });
-      ask.forEach((e, i) => { if (['kv', 'bodyfile', 'utmp'].includes(r.kinds[i])) byContent.set(e, r.kinds[i]); });
+      // 'archive' is in the list for one case only: a .gz that holds a
+      // tar under a name that doesn't say so (bundle.gz). Many files, so
+      // it queues as an archive and expands, like any tarball.
+      ask.forEach((e, i) => { if (['kv', 'bodyfile', 'utmp', 'archive'].includes(r.kinds[i])) byContent.set(e, r.kinds[i]); });
     } catch { /* read as their names say */ }
   }
   for (const e of entries) {
@@ -336,18 +393,26 @@ export const delimHint = (item) => (!item.delimiter ? 'auto-detect'
 /* What the side list says under a file's name: how it will be read, as
    the section lists say what is set in a section. */
 export function queueHint(item) {
+  // A gzipped single file says so after how it will be read: the reader
+  // is the inner file's, and that it arrives compressed is the other
+  // thing the analyst wants confirmed at a glance.
+  const inner = gzipInner(item.name);
+  return inner && item.kind !== 'archive' ? `${queueReadingHint(item)} · gzip` : queueReadingHint(item);
+}
+
+export function queueReadingHint(item) {
   const units = (n, noun) => `${n} ${noun}${n === 1 ? '' : 's'}`;
   switch (item.kind) {
     case 'plugin': return (pluginFormatById(item.format_id)?.label || item.format_id) + (item.configured ? ' · options set' : '');
     case 'text': return 'Text · one line per row';
-    case 'iis': return `IIS log · ${IIS_FORMAT_LABELS[item.log_format || iisLogFormat(item.name)] || 'W3C'}`;
+    case 'iis': return `IIS log · ${IIS_FORMAT_LABELS[item.log_format || iisLogFormat(importRoutingName(item.name))] || 'W3C'}`;
     case 'kv': return 'Key=value log · a column per key';
     case 'json': return 'JSON · ' + (item.flatten_mode === 'full' ? 'flattened'
       : item.flatten_mode === 'depth' ? `flattened ${item.flatten_depth} deep` : 'nested kept as JSON');
     case 'sqlite': return 'SQLite · ' + (item.configured ? units(item.tables.length, 'table') : 'pick tables');
     case 'xlsx': return 'Excel · ' + (item.configured ? units(item.tables.length, 'sheet') : 'pick sheets');
     case 'plaso': return 'Plaso · one timeline table';
-    case 'utmp': return `Login records · ${utmpFileKind(item.name) || 'wtmp/btmp/utmp'}`;
+    case 'utmp': return `Login records · ${utmpFileKind(importRoutingName(item.name)) || 'wtmp/btmp/utmp'}`;
     case 'bodyfile': return 'Body file · a row per file';
     case 'secure': return 'Secure log · ' + (item.year ? `first line in ${item.year}` : 'a row per line');
     case 'archive': return 'Archive · expands on import';
@@ -585,7 +650,8 @@ export function buildEmptyQueuePane(pane) {
   box.append(
     el('div', 'import-empty-title', 'Drop files here'),
     el('p', 'fb-help', 'or anywhere on the window — or add them with the buttons below. “Add from this machine…” reads a file where it is, which is the fast way for anything large.'),
-    el('p', 'fb-help', 'CSV and other delimited text, JSON and JSON Lines, SQLite, Excel, Plaso, IIS logs, key=value logs such as FortiGate’s, Linux wtmp and btmp login records, Linux secure logs and auth.log, TSK body files, and zip or tar archives each import their own way; any other text file imports one line per row.'));
+    el('p', 'fb-help', 'CSV and other delimited text, JSON and JSON Lines, SQLite, Excel, Plaso, IIS logs, key=value logs such as FortiGate’s, Linux wtmp and btmp login records, Linux secure logs and auth.log, TSK body files, and zip or tar archives each import their own way; any other text file imports one line per row.'),
+    el('p', 'fb-help', 'A single file compressed with gzip — events.json.gz, auth.log.1.gz — is read as the file inside it, by the same reader it would have had uncompressed.'));
   pane.append(box);
 }
 
@@ -603,32 +669,40 @@ export function buildEmptyQueuePane(pane) {
    be text (`last` output saved under the name). Delimited and other text
    can be read as a secure log, for messages or a copy saved under another
    name, and a secure log or auth.log a plugin claims can be read by the
-   built-in reader instead.
+   built-in reader instead. A gzipped single file adds one more: Archive,
+   for a tarball under a name that doesn't say so (collection.gz).
    Kinds with no other reading (SQLite, Excel, Plaso, archives) have no
    switch. */
 export function readAsOptions(item) {
   const base = item.queuedAs || item;
+  // A gzipped single file can also be read as an archive, for the one
+  // thing its name can't tell anyone apart from: a tarball called
+  // collection.gz rather than collection.tar.gz. The server says so by
+  // itself for a file read in place (/api/ingest/recognise); for an
+  // upload this switch is the way out.
+  const archive = gzipInner(item.name)
+    ? [['archive', 'Archive', 'Expand it on import and choose from the files it holds']] : [];
   const delimited = ['csv', 'Delimited', 'Split into columns on a delimiter'];
   const lines = ['text', 'One line per row', 'Every line becomes one row in one column, nothing split'];
   const kv = ['kv', 'Key=value', 'A column per key, each line’s values under its own keys (FortiGate and other Fortinet logs)'];
   const body = ['bodyfile', 'Body file', 'A row per file from an fls -m or mactime body file, its four times in UTC'];
   const secure = ['secure', 'Secure log', 'Linux /var/log/secure or auth.log: the syslog header split into columns, and the sshd, sudo, su and PAM events read out'];
   switch (base.kind) {
-    case 'csv': case 'text': return [delimited, lines, kv, body, secure];
-    case 'kv': return [kv, delimited, lines];
-    case 'bodyfile': return [body, delimited, lines];
-    case 'secure': return [secure, delimited, lines];
-    case 'json': return [['json', 'JSON', 'One row per record, its keys as columns'], lines];
-    case 'iis': return [['iis', 'IIS log', 'Columns named by the log itself'], delimited, lines];
-    case 'utmp': return [['utmp', 'Login records', 'Linux wtmp, btmp or utmp: a row per record'], lines];
+    case 'csv': case 'text': return [delimited, lines, kv, body, secure, ...archive];
+    case 'kv': return [kv, delimited, lines, ...archive];
+    case 'bodyfile': return [body, delimited, lines, ...archive];
+    case 'secure': return [secure, delimited, lines, ...archive];
+    case 'json': return [['json', 'JSON', 'One row per record, its keys as columns'], lines, ...archive];
+    case 'iis': return [['iis', 'IIS log', 'Columns named by the log itself'], delimited, lines, ...archive];
+    case 'utmp': return [['utmp', 'Login records', 'Linux wtmp, btmp or utmp: a row per record'], lines, ...archive];
     // A plugin-claimed upload only, as the queue row's "As text" was; and
     // a secure log or auth.log, by either transport, can be read by the
     // built-in reader its name would have had without the plugin.
     case 'plugin': {
       const plugin = ['plugin', pluginFormatById(base.format_id)?.label || base.format_id, 'Read by the plugin that claims this file'];
-      const own = secureLogNamed(item.name) ? [secure] : [];
-      if (item.path) return own.length ? [plugin, ...own] : null;
-      return [plugin, ...own, lines];
+      const own = secureLogNamed(importRoutingName(item.name)) ? [secure] : [];
+      if (item.path) return own.length || archive.length ? [plugin, ...own, ...archive] : null;
+      return [plugin, ...own, lines, ...archive];
     }
     default: return null;
   }
@@ -651,6 +725,9 @@ export function switchKind(item, to) {
   else if (to === 'bodyfile') Object.assign(item, reset, { kind: 'bodyfile', configured: true });
   else if (to === 'secure') Object.assign(item, reset, { kind: 'secure', configured: true });
   else if (to === 'json') Object.assign(item, reset, { kind: 'json', flatten_mode: 'none', flatten_depth: 1, configured: false });
+  // A gzipped file that turns out to be a tarball: it expands on import
+  // and Import a folder opens on what it held, with nothing to set here.
+  else if (to === 'archive') Object.assign(item, reset, { kind: 'archive', configured: true });
   else if (to === 'plugin') {
     Object.assign(item, reset, { kind: 'plugin', format_id: item.queuedAs.format_id, options: item.queuedAs.options, configured: false });
   }
@@ -665,8 +742,12 @@ export function buildQueueItemPane(pane, item, changed) {
   if (cut > 0) where.append(el('span', 'import-file-dir', '\u200E' + item.path.slice(0, cut) + '\u200E'));
   where.title = item.path || item.name;
   const size = itemSize(item);
+  // A gzipped single file: the size shown is the file on disk, so say the
+  // compression too — it is why a 40 MB file makes a 600 MB table, and
+  // why there is a step before the rows start arriving.
+  const gz = gzipInner(item.name) && item.kind !== 'archive' ? 'gzip · ' : '';
   const how = el('span', 'import-file-how',
-    (size != null ? fmtBytes(size) + ' · ' : '') + (item.path ? 'read in place' : 'uploaded when it imports'));
+    (size != null ? fmtBytes(size) + ' · ' : '') + gz + (item.path ? 'read in place' : 'uploaded when it imports'));
   const fileRow = paneRow('File', where, how);
   fileRow.classList.add('import-folder-row');
   pane.append(fileRow);
@@ -702,6 +783,12 @@ export function buildQueueItemPane(pane, item, changed) {
   const note = (text) => settings.append(el('p', 'fb-help import-note', text));
   const ctx = { item, pane, settings, previewHead, preview, rows, foot, footLine, note, changed, rebuild };
 
+  // Said once, above whatever the inner file's own settings are: the
+  // preview below is of what is inside the .gz, which is what imports.
+  if (gzipInner(item.name) && item.kind !== 'archive') {
+    note(`Compressed with gzip. It is decompressed when it imports and read as ${gzipInner(item.name)}, `
+         + 'with the settings below; the table says it came from this file.');
+  }
   if (item.kind === 'csv') buildDelimitedSettings(ctx);
   else if (item.kind === 'text') buildLinesSettings(ctx);
   else if (item.kind === 'json') buildJsonSettings(ctx);

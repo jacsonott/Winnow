@@ -55,6 +55,7 @@ from winnow import version
 from winnow import archive
 from winnow import bodyread
 from winnow import diskspace
+from winnow import gzipped
 from winnow import iisread
 from winnow import secureread
 from winnow import timeparse
@@ -2128,8 +2129,16 @@ def _assoc_ingest(path: str) -> dict:
     # them: its name ranks below a plugin's claim (secureread.py), so with
     # esxi_logs on it is the plugin's here as it is in the queue.
     kind = _ingest_kind_for_path(path)
+    if kind == "archive":
+        # An archive holds many files and the analyst picks from them;
+        # there is nobody at a dialog here. (A gzipped SINGLE file is not
+        # one: it imports as the file inside it, like any other.)
+        raise ValueError("this is an archive — open it from Case → Import files…, "
+                         "which expands it and lets you choose what to import")
+    # Routed by the name INSIDE a gzipped file, as every other router is:
+    # hostd.0.gz is the esxi_logs plugin's, as hostd.0 would be.
     fmt = (None if kind in ("iis", "kv", "utmp", "bodyfile")
-           else PLUGINS.format_for_filename(os.path.basename(path)))
+           else PLUGINS.format_for_filename(os.path.basename(gzipped.routing_name(path))))
     if fmt is not None:
         # Synchronous, like every plugin ingest (no background job): the
         # source exists by the time this returns, so there is no job_id
@@ -3081,16 +3090,21 @@ async def api_ingest_upload(
 PREVIEW_SAMPLE_BYTES = 512 * 1024
 
 
-def _decode_preview_bytes(raw: bytes, path: str | None = None) -> tuple[str, str]:
+def _decode_preview_bytes(raw: bytes, path: str | None = None,
+                          complete: bool | None = None) -> tuple[str, str]:
     # Decided and decoded exactly as the real ingest will (store.
     # decode_text_sample — UTF-16 by BOM, Windows-1252 when it isn't UTF-8)
     # so the preview an analyst approves is the table they actually get:
     # PowerShell's UTF-16LE exports previewed as NUL-riddled noise, and
     # Excel's cp1252 CSVs as "Jos\ufffd". A sample shorter than the cap is
     # the whole file. Returns (text, encoding label). `path`, when the file
-    # is on this disk, lets the decision see as much as the import will.
-    return decode_text_sample(raw, complete=len(raw) < PREVIEW_SAMPLE_BYTES,
-                              encoding=sniff_text_encoding(path) if path else None)
+    # is on this disk, lets the decision see as much as the import will —
+    # left out for a gzipped file, whose sample came from inside it while
+    # sniff_text_encoding would read the compressed bytes. `complete`
+    # overrides the "shorter than the cap" rule for the same reason: a
+    # decompressed head stops where the stream does, not where the cap is.
+    return decode_text_sample(raw, encoding=sniff_text_encoding(path) if path else None,
+                              complete=len(raw) < PREVIEW_SAMPLE_BYTES if complete is None else complete)
 
 
 def _iis_preview_format(log_format: str | None, name: str) -> str:
@@ -3116,33 +3130,45 @@ async def api_ingest_preview(
     modified: float | None = Form(None),   # secure: the file's modified time (epoch seconds), which a head can't carry
 ):
     raw = await file.read(PREVIEW_SAMPLE_BYTES)  # bounded sample — full parse happens at real ingest time
+    # A gzipped upload arrives compressed (the browser sends the head of
+    # the .gz as it sends the head of any other file), so the sample is
+    # inflated here — what the import will read is what is inside it.
+    # `complete` then means "the stream ended inside the head", not "the
+    # head is shorter than the cap", and the size a .gz's head can't
+    # carry is unknown (its trailer is at the other end of the file).
+    gz = gzipped.is_gzip_bytes(raw)
+    complete = len(raw) < PREVIEW_SAMPLE_BYTES
+    if gz:
+        raw, complete = await run_in_threadpool(gzipped.inflate_head, raw, PREVIEW_SAMPLE_BYTES)
+        size = len(raw) if complete else None
     if kind == "utmp":
         # Binary records, not text: nothing to decode, and the layout is
         # read off the bytes (utmpread.detect).
         try:
-            return await run_in_threadpool(utmpread.preview, raw, size, file.filename or "this file")
+            return await run_in_threadpool(utmpread.preview, raw, size,
+                                           gzipped.routing_name(file.filename or "this file"))
         except Exception as e:
             raise HTTPException(400, str(e))
-    text, encoding = _decode_preview_bytes(raw)
+    text, encoding = decode_text_sample(raw, complete=complete)
     try:
         if kind == "text":
             return {**await run_in_threadpool(store().preview_text_lines, text), "encoding": encoding}
         if kind == "iis":
-            fmt = _iis_preview_format(log_format, file.filename or "")
+            fmt = _iis_preview_format(log_format, gzipped.routing_name(file.filename or ""))
             return {**await run_in_threadpool(
-                store().preview_iis_text, text, fmt, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                store().preview_iis_text, text, fmt, complete=complete),
                 "encoding": encoding}
         if kind == "kv":
             return {**await run_in_threadpool(
-                store().preview_kv_text, text, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                store().preview_kv_text, text, complete=complete),
                 "encoding": encoding}
         if kind == "bodyfile":
             return {**await run_in_threadpool(
-                store().preview_bodyfile_text, text, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                store().preview_bodyfile_text, text, complete=complete),
                 "encoding": encoding}
         if kind == "secure":
             return {**await run_in_threadpool(
-                functools.partial(store().preview_secure_text, text, complete=len(raw) < PREVIEW_SAMPLE_BYTES,
+                functools.partial(store().preview_secure_text, text, complete=complete,
                                   year=year, modified=modified)),
                 "encoding": encoding}
         # The uploaded file's own name goes through: the delimiter is read
@@ -3151,7 +3177,7 @@ async def api_ingest_preview(
         # import then builds.
         return {**await run_in_threadpool(
             store().preview_csv_text, text, delimiter=delimiter or None,
-            has_header=has_header, name=file.filename), "encoding": encoding}
+            has_header=has_header, name=gzipped.routing_name(file.filename or "")), "encoding": encoding}
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -3290,16 +3316,31 @@ def _ingest_kind_for_path(path: str) -> str:
     (looks_like_bodyfile). A Linux authentication log by name only
     (secure, auth.log and their rotations — secureread.name_says); the
     callers that honour plugins ask them first, since that name ranks
-    below a plugin's claim."""
-    if iisread.log_format(path):
+    below a plugin's claim.
+
+    A **gzipped single file** is the reader its inner name asks for —
+    events.json.gz is json, u_ex240501.log.gz an IIS log — because that
+    is what is in it (winnow/gzipped.py decompresses it for the reader,
+    and the content probes below read inside it too). A tarball, named
+    .tar.gz or .tgz or found by looking (gzipped.holds_tar: a support
+    bundle someone renamed), is "archive": many files, not one, and
+    archive.py's expansion is the way in."""
+    # The name routes, the file is what gets probed: `named` drops a
+    # .gz so the name gates read events.json, while every looks_like_*
+    # below still reads the file at `path` (and inside it, if gzipped).
+    inner = gzipped.inner_name(path)
+    if gzipped.holds_tar(path) or (inner is None and archive.looks_like_archive(path)):
+        return "archive"
+    named = inner or path
+    if iisread.log_format(named):
         return "iis"
-    if utmpread.log_kind(path):
+    if utmpread.log_kind(named):
         return "utmp"
-    if bodyread.name_says(path):
+    if bodyread.name_says(named):
         return "bodyfile"
-    if secureread.name_says(path):
+    if secureread.name_says(named):
         return "secure"
-    suffix = Path(path).suffix.lower()
+    suffix = Path(named).suffix.lower()
     if suffix in SQLITE_IMPORT_EXTENSIONS:
         return "sqlite"
     if suffix in XLSX_IMPORT_EXTENSIONS:
@@ -3424,32 +3465,41 @@ def api_ingest_preview_path(body: PreviewPath):
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No file at {body.path}")
     kind = body.kind or _ingest_kind_for_path(body.path)
+    # A gzipped single file is previewed as the file inside it: a bounded
+    # DECOMPRESSED head (gzipped.head_and_end), named by the inner name
+    # (the delimiter is read from the extension, an IIS log's format from
+    # the whole name), and the date of what gzip compressed, which is what
+    # a secure log's year-less stamps are dated from. The kinds below that
+    # need a real file go through Store, which decompresses a copy.
+    named = gzipped.routing_name(body.path)
     try:
         if kind == "utmp":
             return store().preview_utmp_file(body.path)
         if kind in ("csv", "text", "iis", "kv", "bodyfile", "secure"):
             # Same bounded sample the upload preview reads — never the file.
-            with open(body.path, "rb") as f:
-                raw = f.read(PREVIEW_SAMPLE_BYTES)
-            text, encoding = _decode_preview_bytes(raw, body.path)
+            raw, complete = gzipped.head_and_end(body.path, PREVIEW_SAMPLE_BYTES)
+            # The encoding is decided from the sample for a gzipped file:
+            # sniff_text_encoding would read the compressed bytes.
+            text, encoding = _decode_preview_bytes(raw, None if named != body.path else body.path,
+                                                   complete=complete)
             if kind == "text":
                 return {**store().preview_text_lines(text), "encoding": encoding}
             if kind == "iis":
-                fmt = _iis_preview_format(body.log_format, body.path)
-                return {**store().preview_iis_text(text, fmt, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                fmt = _iis_preview_format(body.log_format, named)
+                return {**store().preview_iis_text(text, fmt, complete=complete),
                         "encoding": encoding}
             if kind == "kv":
-                return {**store().preview_kv_text(text, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                return {**store().preview_kv_text(text, complete=complete),
                         "encoding": encoding}
             if kind == "bodyfile":
-                return {**store().preview_bodyfile_text(text, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                return {**store().preview_bodyfile_text(text, complete=complete),
                         "encoding": encoding}
             if kind == "secure":
-                return {**store().preview_secure_text(text, complete=len(raw) < PREVIEW_SAMPLE_BYTES,
-                                                      year=body.year, modified=os.path.getmtime(body.path)),
+                return {**store().preview_secure_text(text, complete=complete, year=body.year,
+                                                      modified=gzipped.mtime(body.path)),
                         "encoding": encoding}
             return {**store().preview_csv_text(text, delimiter=body.delimiter or None,
-                                               has_header=body.has_header, name=body.path),
+                                               has_header=body.has_header, name=named),
                     "encoding": encoding}
         if kind == "json":
             return store().preview_json_file(body.path, flatten_mode=body.flatten_mode,
@@ -3471,18 +3521,22 @@ def api_ingest_recognise(body: RecognisePaths):
     content rather than name: "kv" for a key=value log
     (looks_like_kv_log), "bodyfile" for a body file under another name
     (looks_like_bodyfile), "utmp" for Linux login records under another
-    name (looks_like_utmp), else null. The import queue asks this as it
-    queues files added by path, the ones a name would leave as raw text,
-    so the queue says how a FortiGate log, an fls listing or a renamed
-    wtmp will be read before it imports — the browser reads an upload's
-    first bytes itself. Reads the first 8 KB of each; a path that isn't a
-    regular file is null."""
+    name (looks_like_utmp), "archive" for a tarball a .gz name doesn't
+    own up to (gzipped.holds_tar — bundle.gz), else null. The import queue
+    asks this as it queues files added by path, the ones a name would
+    leave as raw text, so the queue says how a FortiGate log, an fls
+    listing or a renamed wtmp will be read before it imports — the browser
+    reads an upload's first bytes itself. Reads the first 8 KB of each (of
+    what is INSIDE a gzipped one); a path that isn't a regular file is
+    null."""
     if len(body.paths) > BROWSE_LIST_CAP:
         raise HTTPException(400, f"At most {BROWSE_LIST_CAP} files at once")
 
     def kind_of(p: str) -> str | None:
         if not os.path.isfile(p):
             return None
+        if gzipped.holds_tar(p):
+            return "archive"
         if looks_like_kv_log(p):
             return "kv"
         if looks_like_bodyfile(p):
@@ -3568,6 +3622,13 @@ def api_ingest_job_path(body: IngestJobPath):
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No file at {body.path}")
     kind = body.kind or _ingest_kind_for_path(body.path)
+    if kind == "archive":
+        # A tarball or zip: many files, so there is a step the analyst
+        # has to take (which of them to import) that this route can't
+        # answer for them. Named rather than failed on its first line: a
+        # .gz that holds a tar is the one way to land here by accident.
+        raise HTTPException(400, f"{os.path.basename(body.path)} is an archive, not one file — "
+                                 "import it as an archive and it expands, then choose from what it held")
     if kind == "sqlite" and not body.tables:
         raise HTTPException(400, "A sqlite import needs its tables picked first")
     if kind == "xlsx" and not body.tables:
@@ -4361,15 +4422,22 @@ def _ingest_via_plugin(path: str, format_id: str, name: str | None,
     honest answer to "which file was this"."""
     fmt = PLUGINS.get_format(format_id)  # KeyError -> 400 at the route
     opts = fmt.resolve_options(options)
-    result = fmt.parse(path, opts)
-    if not isinstance(result, dict) or "columns" not in result or "rows" not in result:
-        raise ValueError(f"Plugin format {format_id} returned no columns/rows")
-    rec = store().ingest_rows(
-        result["columns"], result["rows"],
-        name=name or result.get("name") or os.path.basename(path),
-        path=path, build_fts=build_fts,
-        column_types=result.get("column_types"),
-    )
+    # A gzipped single file (hostd.0.gz) is parsed from a decompressed
+    # copy, under the name inside it — a plugin parser takes a path and
+    # reads meaning from its name (esxi_logs takes the log type from it).
+    # The table records the .gz, as it records an upload's own name.
+    with gzipped.decompressed(path, recorded_path or path) as real:
+        result = fmt.parse(real, opts)
+        if not isinstance(result, dict) or "columns" not in result or "rows" not in result:
+            raise ValueError(f"Plugin format {format_id} returned no columns/rows")
+        rec = store().ingest_rows(
+            result["columns"], result["rows"],
+            name=name or result.get("name") or os.path.basename(path),
+            path=real, build_fts=build_fts,
+            column_types=result.get("column_types"),
+        )
+    if recorded_path is None and real != path:
+        recorded_path = os.path.abspath(path)
     if recorded_path is not None:
         store().set_source_path(rec["id"], recorded_path)
         rec["path"] = recorded_path
