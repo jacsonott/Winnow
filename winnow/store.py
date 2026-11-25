@@ -8711,11 +8711,59 @@ class Store:
                 if cur.rowcount == 0:
                     raise KeyError(f"No merge {-source_id}")
         else:
+            before = self._table_label(self._source_lite(source_id))
             with self.lock, self.db:
                 cur = self.db.execute("UPDATE sources SET nickname=? WHERE id=?", (nickname, source_id))
                 if cur.rowcount == 0:
                     raise KeyError(f"No table {source_id}")
+            if self._table_label(self._source_lite(source_id)) != before:
+                self._recompute_table_labels(source_id)
         return self.get_source(source_id)
+
+    def _recompute_table_labels(self, source_id: int) -> None:
+        """Re-derive this table's columns that write its name (Row as JSON
+        with a merge's From table column — timeparse.table_label_input),
+        after a rename changed it. The merge's From table column shows the
+        new name at once, being computed per query (_member_projection);
+        these hold the old one until recomputed, and a row whose JSON
+        disagrees with its own From table cell would be the column saying
+        something the case does not.
+
+        One job for all of them, as the cascade after a re-derive runs
+        (_cascade_dependent_derives), and it cascades on in turn to
+        anything derived from them. A column still building is left to
+        its own job, since two jobs writing one column race; that job
+        read the name when it started, so a rename during it is the one
+        case Re-derive has to put right. Recorded rather than raised on
+        failure: the rename itself has happened."""
+        defs = [d for d in self.list_derived_columns(source_id)
+                if timeparse.table_label_input(d["op_id"], d["input_column"], d.get("params"))]
+        ready = [d for d in defs if d["status"] != "building"]
+        if not ready:
+            return
+        try:
+            with self.lock, self.db:
+                self.db.executemany(
+                    "UPDATE derived_columns SET status='building', parse_failures=NULL WHERE id=?",
+                    [(d["id"],) for d in ready],
+                )
+            self.start_ingest_job(
+                "derive", "", name=(f"{ready[0]['name']} (recomputed — the table was renamed)"
+                                    if len(ready) == 1 else f"{len(ready)} columns (recomputed — the table was renamed)"),
+                options={"def_ids": [d["id"] for d in ready], "drop_on_cancel": False,
+                         "previous": ready,
+                         "units_total": self._source_lite(source_id)["row_count"]},
+            )
+        except Exception as e:  # noqa: BLE001 — the rename stands; say what was not recomputed
+            wlog.record("warn", f"Not recomputed after a rename: {', '.join(d['name'] for d in ready)} "
+                                f"still name the table by its old name — re-derive them "
+                                f"({type(e).__name__}: {e})")
+            with contextlib.suppress(Exception):
+                with self.lock, self.db:
+                    self.db.executemany(
+                        "UPDATE derived_columns SET status='partial' WHERE id=? AND status='building'",
+                        [(d["id"],) for d in ready],
+                    )
 
     def set_source_path(self, source_id: int, path: str | None) -> None:
         """Where a table says it was imported from, when that is not the
@@ -9011,6 +9059,14 @@ class Store:
                 if not c.get("source_column") and _member_column(member, c, keys) is None]
 
     @staticmethod
+    def _table_label(src: dict) -> str:
+        """What a merge's "From table" column says for a member's rows: its
+        nickname, else its file's name. One place, because a derive that
+        reads that column (timeparse.table_label_input) has to write the
+        same words the merge shows."""
+        return src.get("nickname") or src["name"]
+
+    @staticmethod
     def _member_projection(merge_src: dict, msrc: dict) -> list[str] | None:
         """How one member of a merge must be read so that it exposes the
         merge's columns under the merge's spelling: a SELECT list over the
@@ -9037,7 +9093,7 @@ class Store:
             tuple((c["name"], bool(c.get("derived")), bool(c.get("source_column")))
                   for c in merge_src["columns"]),
             tuple((c["name"], bool(c.get("derived"))) for c in msrc["columns"]),
-            msrc.get("nickname") or msrc["name"])
+            Store._table_label(msrc))
         return None if got is None else list(got)
 
     def _member_read_src(self, merge_src: dict, msrc: dict) -> dict:
@@ -9626,8 +9682,10 @@ class Store:
             # this exists for — each column is on one table only, which is
             # the whole reason to coalesce them.
             members = self._resolve_members(source_id)
+            # The merge's "From table" column, when the op can read it,
+            # is each member's own name (_merge_derive_params).
+            params = self._merge_derive_params(self._source_lite(source_id), op_id, input_column, params)
             inputs = timeparse.op_inputs(op_id, input_column, params)
-            self._check_merge_derive_inputs(self._source_lite(source_id), inputs)
             absent: dict[int, set[str]] = {}
             for m in members:
                 msrc = self._source_lite(m["source_id"])
@@ -9699,14 +9757,54 @@ class Store:
         whether every member has it or only some do — but not the merge's
         own "From table" column, which is a label for each row's table
         that no member holds, so a column derived from it would be empty
-        on every row."""
+        on every row. The exception is an op that can read it as each
+        table's name (Row as JSON), which _merge_derive_params takes out
+        of `inputs` before asking here."""
         for col in inputs:
             entry = self._find_column(merge_src, col)
             if entry is None:
                 raise ValueError(f"This merge has no column called {col!r}")
             if entry.get("source_column"):
                 raise ValueError(f"{entry['name']!r} names the table each row came from, which none of "
-                                 f"the merged tables holds as a column — it can't be derived from")
+                                 f"the merged tables holds as a column — it can't be derived from, "
+                                 f"only included in Row as JSON")
+
+    def _merge_derive_params(self, merge_src: dict, op_id: str, input_column: str,
+                             params: dict | None) -> dict:
+        """`params` for a derive made on a merge, its inputs checked
+        (_check_merge_derive_inputs) and its table-label param said by the
+        merge rather than by the caller: the input that is the merge's
+        "From table" column when the op can read one
+        (timeparse.table_label_param), and nothing otherwise. Each member's
+        definition then reads that input as the member's own name
+        (_input_ref), which is what the merge shows in its rows — so Row as
+        JSON on a merge can say which table each row came from. An op
+        without the param is refused that column, as before."""
+        out = dict(params or {})
+        key = timeparse.table_label_param(op_id)
+        if key:
+            out.pop(key, None)
+        label = None
+        rest = []
+        for col in timeparse.op_inputs(op_id, input_column, out):
+            entry = self._find_column(merge_src, col)
+            if key and entry is not None and entry.get("source_column"):
+                label = col
+            else:
+                rest.append(col)
+        self._check_merge_derive_inputs(merge_src, rest)
+        if label is not None:
+            out[key] = label
+        return out
+
+    def _settle_table_label(self, op_id: str, input_column: str, params: dict) -> dict:
+        """Validated `params` without a table-label param that names none
+        of the inputs: the analyst took the From table column out of the
+        list, so nothing reads as the table's name any more."""
+        key = timeparse.table_label_param(op_id)
+        if key and key in params and timeparse.table_label_input(op_id, input_column, params) is None:
+            params = {k: v for k, v in params.items() if k != key}
+        return params
 
     def _merge_derive_absent(self, msrc: dict, inputs: Iterable[str]) -> set[str]:
         """The inputs of a derive made on a merge that one member lacks
@@ -9714,7 +9812,8 @@ class Store:
         still names them, and reads each as empty (_input_ref)."""
         return {c.lower() for c in inputs if self._find_column(msrc, c) is None}
 
-    def _input_ref(self, src: dict, column: str, alias: str | None = None) -> str:
+    def _input_ref(self, src: dict, column: str, alias: str | None = None,
+                   label: str | None = None) -> str:
         """_col_ref for one input of a derived column, or NULL when the
         table has no such column. A definition made on a merge names the
         merge's columns, and a member that lacks one reads it as empty —
@@ -9723,7 +9822,14 @@ class Store:
         would compute for those rows. Every reader of a definition's
         inputs (the backfill, the failure count, the preview) goes through
         here rather than _col_ref, which would spell a missing column into
-        the SQL and fail the statement."""
+        the SQL and fail the statement.
+
+        `label` is the input that reads as the table's own name
+        (timeparse.table_label_input): the merge's "From table" column,
+        which the merge fills with each member's name. It is that name as
+        a constant, whatever columns the table has."""
+        if label is not None and column.lower() == label.lower():
+            return _sql_text_literal(self._table_label(src))
         if self._find_column(src, column) is None:
             return "NULL"
         return self._col_ref(src, column, alias) if alias else self._col_ref(src, column)
@@ -9757,7 +9863,8 @@ class Store:
         op = timeparse.OPERATIONS.get(op_id)
         if op is None:
             raise ValueError(f"Unknown operation: {op_id}")
-        params = timeparse.validate_params(op_id, params)
+        params = self._settle_table_label(op_id, input_column, timeparse.validate_params(op_id, params))
+        label = timeparse.table_label_input(op_id, input_column, params)
         src = self._source_lite(source_id)
 
         name = (name or "").strip()
@@ -9773,12 +9880,14 @@ class Store:
         # Inputs: a parse operation reads one of the file's own columns; a
         # two-input operation (duration) can also read an already-built
         # derived datetime column, so deltas can chain off parsed values.
-        def _check_input(col: str, label: str) -> dict | None:
+        def _check_input(col: str, role: str) -> dict | None:
+            if label is not None and col.lower() == label.lower():
+                return None   # this table's own name, not a column (_input_ref)
             entry = self._find_column(src, col)
             if entry is None:
                 if col.lower() in absent:
                     return None   # read as empty on this table (_input_ref)
-                raise ValueError(f"No column called {col!r} to use as the {label}")
+                raise ValueError(f"No column called {col!r} to use as the {role}")
             # A derived input is fine — chains are how a JSON field that
             # holds XML gets taken apart in two steps, and the backfill
             # already reads inputs through _col_ref/_from_clause, which
@@ -10386,7 +10495,14 @@ class Store:
         prepared = []
         merge_src = self._source_lite(source_id) if source_id is not None and source_id < 0 else None
         for d in scope:
-            new_params = timeparse.validate_params(d["op_id"], params if params is not None else d["params"])
+            raw = params if params is not None else d["params"]
+            if merge_src is not None:
+                # The From table column, on a merge, is said by the merge
+                # (_merge_derive_params) — added to the list now, or taken
+                # out of it.
+                raw = self._merge_derive_params(merge_src, d["op_id"], d["input_column"], raw)
+            new_params = self._settle_table_label(d["op_id"], d["input_column"],
+                                                  timeparse.validate_params(d["op_id"], raw))
             self._check_rederive_inputs(d, new_params, merge_src)
             op = timeparse.OPERATIONS[d["op_id"]]
             if op.get("check"):
@@ -10449,8 +10565,9 @@ class Store:
         "no such column"; now it would be a silently empty column."""
         src = self._source_lite(d["source_id"])
         before = {c.lower() for c in timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params"))}
+        label = (timeparse.table_label_input(d["op_id"], d["input_column"], params) or "").lower()
         for col in timeparse.op_inputs(d["op_id"], d["input_column"], params):
-            if self._find_column(src, col) is not None or col.lower() in before:
+            if self._find_column(src, col) is not None or col.lower() in before or col.lower() == label:
                 continue
             if merge_src is not None:
                 self._check_merge_derive_inputs(merge_src, [col])
@@ -10612,16 +10729,27 @@ class Store:
             # definition reading it.
             slots: dict[str, int] = {}
 
-            def slot(col: str) -> int:
-                key = col.lower()
+            def slot(key: str) -> int:
                 if key not in slots:
                     slots[key] = len(slots)
                 return slots[key]
 
+            # The input a definition reads as this table's own name (a
+            # merge's From table column — timeparse.table_label_input) has
+            # a slot of its own: the same name, unmarked, in another
+            # definition of the same pass is a column like any other.
+            label_slot = "\0table label"
             plans = []
+            # slot() keys case-insensitively but _col_ref needs the real name.
+            real = {}
             for d in defs:
                 op = timeparse.OPERATIONS[d["op_id"]]
                 inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d["params"])
+                label = timeparse.table_label_input(d["op_id"], d["input_column"], d["params"])
+                keys = [label_slot if label is not None and c.lower() == label.lower() else c.lower()
+                        for c in inputs]
+                for c, k in zip(inputs, keys):
+                    real.setdefault(k, c)
                 # state["inputs"]: the ordered column names behind the values
                 # parse_multi receives — an op that needs them (row_json's keys)
                 # reads them here rather than growing a second calling shape;
@@ -10630,17 +10758,14 @@ class Store:
                 # Multi-input ops only: a stateful single-input op (syslog's
                 # year rollover) takes an empty dict as "fresh" and seeds it.
                 state = self._multi_input_state(src, inputs) if op["multi_input"] else {}
-                plans.append({"d": d, "op": op, "state": state, "slots": [slot(c) for c in inputs],
+                plans.append({"d": d, "op": op, "state": state, "slots": [slot(k) for k in keys],
                               "raised": 0, "first_error": None})
             cols = list(slots.keys())
-            # slot() keys case-insensitively but _col_ref needs the real name.
-            real = {}
-            for d in defs:
-                for c in timeparse.op_inputs(d["op_id"], d["input_column"], d["params"]):
-                    real[c.lower()] = c
             # _input_ref: an input this table lacks (a merge's column only
-            # some members have) is NULL in every row.
-            sel = ", ".join(self._input_ref(src, real[c]) for c in cols)
+            # some members have) is NULL in every row; the table-label one
+            # is the table's name.
+            sel = ", ".join(self._input_ref(src, real[c], label=real[c] if c == label_slot else None)
+                            for c in cols)
 
             names = [d["name"] for d in defs]
             assigns = ", ".join(f"{q(n)}=excluded.{q(n)}" for n in names)
@@ -10995,7 +11120,12 @@ class Store:
         inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params"))
         # An input the table lacks is empty in every row, so it is never
         # what a row "had" (_input_ref) — and naming it would fail the SQL.
-        refs = [self._input_ref(src, c, alias) for c in inputs if self._find_column(src, c) is not None]
+        # Nor is the table's own name (a merge's From table column): every
+        # row has it, so counting it would make every row one that had
+        # something to read.
+        label = (timeparse.table_label_input(d["op_id"], d["input_column"], d.get("params")) or "").lower()
+        refs = [self._input_ref(src, c, alias) for c in inputs
+                if self._find_column(src, c) is not None and c.lower() != label]
         if not refs:
             return "0"
         if len(inputs) == 1:
@@ -11178,7 +11308,7 @@ class Store:
         members without it read it as empty), so the preview reads it
         where it is rather than refusing it or sampling a member that
         would only offer blanks. The merge's "From table" label is refused
-        as add_derived_column refuses it."""
+        as add_derived_column refuses it for an op that reads one column."""
         merge_src = self._source_lite(merge_id)
         for col in columns:
             if self._find_column(merge_src, col) is None:
@@ -11322,17 +11452,21 @@ class Store:
             # representative, and the only side with a real table to sample.
             source_id = self._derive_preview_member(source_id, [column])
         src = self._source_lite(source_id)
-        if self._find_column(src, column) is None:
+        params = self._settle_table_label(op_id, column, params)
+        # The input a member's definition reads as its own name (made on a
+        # merge, previewed from Re-derive on the member's own table).
+        label = (timeparse.table_label_input(op_id, column, params) or "").lower()
+        if self._find_column(src, column) is None and column.lower() != label:
             raise KeyError(column)
         if op["multi_input"]:
             inputs = timeparse.op_inputs(op_id, column, params)
             for other in inputs[1:]:
-                if self._find_column(src, other) is None:
+                if self._find_column(src, other) is None and other.lower() != label:
                     raise KeyError(other)
             state = self._multi_input_state(src, inputs)   # see backfill_derived_columns
             if op.get("prepare"):
                 op["prepare"](self, params, state)
-            sel = ", ".join(self._col_ref(src, c) for c in inputs)
+            sel = ", ".join(self._input_ref(src, c, label=label or None) for c in inputs)
             with self._reader() as ro:
                 rows = ro.execute(
                     f"SELECT {sel} FROM {self._from_clause(src)} LIMIT ?", (limit,),
@@ -11370,10 +11504,13 @@ class Store:
         for col in inputs:
             if self._find_column(merge_src, col) is None:
                 raise KeyError(col)
-        self._check_merge_derive_inputs(merge_src, inputs)
+        # The From table column, when the op reads one, is each member's
+        # name (_merge_derive_params), and every member has one of those.
+        params = timeparse.validate_params(op_id, self._merge_derive_params(merge_src, op_id, column, params))
+        label = timeparse.table_label_input(op_id, column, params)
         op = timeparse.OPERATIONS[op_id]
         members = [m for m in self._resolve_members(merge_id)
-                   if any(self._find_column(m["src"], c) is not None for c in inputs)]
+                   if label is not None or any(self._find_column(m["src"], c) is not None for c in inputs)]
         per = max(1, limit // max(1, len(members)))
         # One prepare, then each member's own input types on top of it
         # (_multi_input_state), as each member's backfill will have them.
@@ -11386,7 +11523,7 @@ class Store:
             for m in members:
                 msrc = m["src"]
                 state = {**prepared, **self._multi_input_state(msrc, inputs)}
-                sel = ", ".join(self._input_ref(msrc, c) for c in inputs)
+                sel = ", ".join(self._input_ref(msrc, c, label=label) for c in inputs)
                 got = ro.execute(
                     f"SELECT {sel} FROM {self._from_clause(msrc)} ORDER BY rid LIMIT ?", (per,),
                 ).fetchall()

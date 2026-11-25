@@ -60,3 +60,65 @@ def _assert_grid_value(page, keys):
     assert list(obj) == keys
     assert obj["EventId"] in (4624, 4625, 4688, 1) and isinstance(obj["EventId"], int)
     assert obj["Host"].startswith("H")
+
+
+# A header no other module ingests, so nothing else lands in this merge.
+RJ_HEADER = "RjWhen,RjUser"
+
+
+def test_row_as_json_on_a_merge_includes_from_table(page, api, tmp_path, format_detected, derive_pick):
+    """On a merge with a From table column, the dialog lists it among the
+    columns like every other, and Add column used to refuse it ("'From
+    table' names the table each row came from… can't be derived from").
+    Each row's JSON now names its table the way the merge does — the
+    nickname where the table has one."""
+    home = page.evaluate("() => __winnow.S.sourceId")
+    ids, merge_id = [], None
+    try:
+        for n, user in enumerate(("alice", "bob")):
+            f = tmp_path / f"rj_{n}.csv"
+            f.write_text(f"{RJ_HEADER}\n2026-03-1{n} 09:00:00,{user}\n", encoding="utf-8")
+            rec = api("/api/ingest/path", "POST", {"path": str(f), "name": f"rj_{n}.csv", "build_fts": False})
+            ids.append(rec["id"])
+        api(f"/api/source/{ids[1]}/nickname", "POST", {"nickname": "RJ DC01"})
+        merge_id = api("/api/merges", "POST", {"name": "rj merge", "source_ids": ids,
+                                               "source_column": True})["id"]
+        page.evaluate("(id) => __winnow.loadSources().then(() => __winnow.openSource(id))", merge_id)
+        page.wait_for_function("(id) => __winnow.S.sourceId === id && __winnow.S.view", arg=merge_id)
+
+        page.evaluate("() => __winnow.openDerivedColumnModal('RjUser')")
+        page.wait_for_selector("#modal:not([hidden])")
+        format_detected()
+        derive_pick("Row as JSON")
+        chips = [c.replace("✕", "").strip()
+                 for c in page.locator(".derived-columns .fb-groupby-chip").all_inner_texts()]
+        assert chips == ["From table", "RjWhen"]
+        # Nothing is drawn for the hidden param that records it.
+        assert page.locator('#modalBody [data-param="table_column"]').count() == 0
+        page.wait_for_function("() => document.querySelector('#modalBody').textContent"
+                               ".includes('{\"RjUser\":\"bob\",\"From table\":\"RJ DC01\"')")
+        page.locator("#modalBody button", has_text="Add column").click()
+        page.wait_for_function("() => __winnow.S.columns.some((c) => c.name === 'Row as JSON')", timeout=30_000)
+        cells = []
+        for _ in range(100):
+            cells = page.evaluate("""async () => {
+              const i = __winnow.S.columns.findIndex((c) => c.name === 'Row as JSON');
+              if (i < 0 || !__winnow.S.view) return [];
+              const r = await __winnow.api(`/api/rows?view_id=${__winnow.S.view.view_id}&start=0&count=2`);
+              return r.rows.map((row) => row.cells[i] || ''); }""")
+            if len(cells) == 2 and all(cells):
+                break
+            page.wait_for_timeout(200)
+        assert sorted(json.loads(c)["From table"] for c in cells) == ["RJ DC01", "rj_0.csv"]
+        assert all(list(json.loads(c)) == ["RjUser", "From table", "RjWhen"] for c in cells)
+    finally:
+        if merge_id is not None:
+            api(f"/api/merges/{-merge_id}", "DELETE")
+        for sid in ids:
+            api(f"/api/source/{sid}", "DELETE")
+        page.evaluate("""(home) => (async () => {
+          __winnow.S.sourceId = null;
+          await __winnow.loadSources();
+          await __winnow.openSource(home);
+        })()""", home)
+        page.wait_for_selector(".row")

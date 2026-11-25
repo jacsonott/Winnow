@@ -571,11 +571,19 @@ derive **Base64 decode** from that column.
 | Operation | What it does | Example |
 | --- | --- | --- |
 | **First non-empty value** | The **Parse column**, then each column under **Then try**, in order; the first that isn't blank wins. All blank stays blank. When every column is a datetime column, the first time wins and the result is a datetime column, whatever format each column stores its times in (see [What a derived column is](#what-a-derived-column-is)). On a merged table the columns can each be in different tables (see [Derived columns on merged tables](#derived-columns-on-merged-tables)) | `SubjectUserName` blank, then `TargetUserName` = `alice` → `alice`; `TimeCreated` blank, then `Timestamp` = `1/5/2024 1:25:21 PM` → `2024-01-05 13:25:21` |
-| **Row as JSON** | The **Parse column** plus the listed **Columns** as one compact JSON object per row, for pasting into a ticket or a note. Every other column starts listed; remove what you don't want. **Skip empty cells** leaves blanks out | `{"Host":"WS01","EventId":4624,"Code":"007"}` |
+| **Row as JSON** | The **Parse column** plus the listed **Columns** as one compact JSON object per row, for pasting into a ticket or a note. Every other column starts listed; remove what you don't want. **Skip empty cells** leaves blanks out. On a merged table the list includes the **From table** column, so each object can say which table its row came from | `{"Host":"WS01","EventId":4624,"Code":"007"}` |
 
 In **Row as JSON**, a cell is written as a bare number only when that
 number reads back exactly as the cell did, so `4624` is a number while
 `007` and `1.10` stay strings.
+
+On a merged table with a **From table** column, that column starts in
+**Row as JSON**'s list like the others. Each row's object then names its
+table the way the merge does, by its nickname if it has one:
+`{"Host":"WS01","From table":"DC01 Security","EventId":4624}`. Remove
+**From table** from the list to leave it out. If you rename a table
+later, Winnow recomputes the column on that table so the name in the
+JSON stays the same as the **From table** column.
 
 ## Comparing two times
 
@@ -672,7 +680,8 @@ judged on the columns it has, so a table with only `TimeCreated` and one
 with only `Created0x10` both count as all datetime columns.
 A table that has none of the columns gets an empty column, which is not
 counted as unparsed. The merge's **From table** column can't be derived
-from, since none of the tables holds it.
+from, since none of the tables holds it. The exception is **Row as JSON**,
+which can include it (see [Combining columns](#combining-columns)).
 
 The preview samples the first member table that has the column, or the
 merged view under **This view**. For an operation that reads several

@@ -511,6 +511,36 @@ def op_inputs(op_id: str, input_column: str, params: dict | None) -> list[str]:
     return out
 
 
+def table_label_param(op_id: str) -> str | None:
+    """The name of the op's `table_label` param, or None for an op that
+    cannot read a table's name.
+
+    A merge's "From table" column is no member's column: each member
+    shows its own name there (Store._member_projection). An op that
+    declares a `table_label` param can still take that column as an
+    input; the store sets the param to the input's name, and each table
+    then reads that input as its own name rather than as a column. Row
+    as JSON is the one that does, so the object can say which table its
+    row came from. The param is the store's to set, never the analyst's
+    (`hidden`, so the dialog draws nothing for it)."""
+    op = OPERATIONS.get(op_id)
+    if op is None:
+        return None
+    return next((p["name"] for p in op["params"] if p.get("type") == "table_label"), None)
+
+
+def table_label_input(op_id: str, input_column: str, params: dict | None) -> str | None:
+    """Which of the op's inputs (op_inputs) reads as its table's own name:
+    the one its table_label param names, as op_inputs spells it, or None.
+    A param naming no input says nothing — the analyst took that column
+    back out of the list."""
+    key = table_label_param(op_id)
+    named = str((params or {}).get(key) or "").strip() if key else ""
+    if not named:
+        return None
+    return next((c for c in op_inputs(op_id, input_column, params) if c.lower() == named.lower()), None)
+
+
 def list_ops() -> list[dict]:
     """JSON-able registry listing for the UI — everything but the callables."""
     out = []

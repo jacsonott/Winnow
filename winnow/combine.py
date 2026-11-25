@@ -141,6 +141,14 @@ register_op({
             "name": "skip_empty", "label": "Skip empty cells", "type": "bool", "default": False,
             "help": "Leave out columns whose cell is blank, so the object carries only what the row has.",
         },
+        {
+            # On a merge, which of the columns is its "From table" column:
+            # each table then writes its own name under that key, as the
+            # merge shows it (timeparse.table_label_param). The store sets
+            # it from the merge; the dialog shows nothing for it.
+            "name": "table_column", "label": "From table column", "type": "table_label",
+            "required": False, "hidden": True,
+        },
     ],
     "value_type": "text",
     "family": "combine",
