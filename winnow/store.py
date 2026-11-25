@@ -15032,7 +15032,15 @@ class Store:
 
         `spec` counts only the rows a view spec leaves instead of the whole
         table — see _column_values_in_spec. A spec that narrows nothing is
-        the whole table, and takes the indexed path below."""
+        the whole table, and takes the indexed path below.
+
+        Most common first, ties by value, here and in
+        _column_values_in_spec. `ORDER BY n DESC` alone left equal counts
+        in whatever order the GROUP BY produced them, and that order
+        changes when the index above finishes building (a temp B-tree scan
+        before it, the index's after): the same list opened twice could
+        swap two values, and test_column_values_spec.py::test_the_route,
+        whose two calls can straddle the build, failed on Windows CI."""
         if spec is not None:
             narrowed = self._column_values_in_spec(source_id, column, spec, limit)
             if narrowed is not None:
@@ -15060,12 +15068,12 @@ class Store:
                     f"SELECT {q(column)} AS val, count(*) AS n "
                     f"FROM {self._member_from(src, m, uses=(column,))} GROUP BY 1" for m in members
                 )
-                sql = f"SELECT val, sum(n) AS n FROM ({union_sql}) GROUP BY 1 ORDER BY n DESC LIMIT ?"
+                sql = f"SELECT val, sum(n) AS n FROM ({union_sql}) GROUP BY 1 ORDER BY n DESC, val LIMIT ?"
             else:
                 union_sql = union_all(
                     f"SELECT {q(column)} AS val FROM {self._member_from(src, m, uses=(column,))}" for m in members
                 )
-                sql = f"SELECT val, count(*) AS n FROM ({union_sql}) GROUP BY 1 ORDER BY n DESC LIMIT ?"
+                sql = f"SELECT val, count(*) AS n FROM ({union_sql}) GROUP BY 1 ORDER BY n DESC, val LIMIT ?"
             rows = ro.execute(sql, (limit,)).fetchall()
         return [{"value": r["val"], "count": r["n"]} for r in rows]
 
@@ -15146,7 +15154,7 @@ class Store:
             else:
                 counted = union_all(f"SELECT {q(column)} AS val, count(*) AS n{rest} GROUP BY 1"
                                     for _, rest in parts)
-            sql = f"SELECT val, sum(n) AS n FROM ({counted}) GROUP BY 1 ORDER BY n DESC LIMIT ?"
+            sql = f"SELECT val, sum(n) AS n FROM ({counted}) GROUP BY 1 ORDER BY n DESC, val LIMIT ?"
         else:
             table = src["table_name"]
             where, params = self._compile_where(source_id, src, spec, colnames, scan_from=q(table),
@@ -15163,7 +15171,7 @@ class Store:
                            + (f" AND {tagged}" if tagged else "") + " GROUP BY 1")
             else:
                 counted = f"SELECT {q(column)} AS val, count(*) AS n FROM {frm} WHERE {where} GROUP BY 1"
-            sql = f"SELECT val, n FROM ({counted}) ORDER BY n DESC LIMIT ?"
+            sql = f"SELECT val, n FROM ({counted}) ORDER BY n DESC, val LIMIT ?"
         with self._reader() as ro:
             rows = ro.execute(sql, (*params, limit)).fetchall()
         return [{"value": r["val"], "count": r["n"]} for r in rows]
