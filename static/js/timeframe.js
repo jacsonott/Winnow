@@ -10,6 +10,7 @@ import { hasActiveFilterTree, openFilterBuilder } from './filterbuilder.js';
 import { VALUE_FILTER_AUTO_MAX, setColumnValueFilter, setValueFilterMode, valueFilterAutoOn, valueFilterEnabled } from './filters.js';
 import { moveCursor, render } from './grid.js';
 import { drawRail, regroupIfGroupedByTag } from './grouping.js';
+import { startJobsPoll } from './jobs.js';
 import { openMergeBuilder } from './merge.js';
 import { applyPreset, filtersForCurrentSource, headerSig, loadSavedFilters, matchingSavedFilters, nicknameFor, saveHeaderNickname, setNicknameFor } from './savedfilters.js';
 import { saveAppearance } from './settings.js';
@@ -1596,6 +1597,7 @@ export function buildNamePanel(container, refresh) {
     if (merge && !v) throw new Error('a merge needs a name');
     await post(`/api/source/${src.id}/nickname`, { nickname: v });
     await loadSources();
+    startJobsPoll();   // a renamed table's Row as JSON is recomputed (editSourceNickname)
     const fresh = S.sources.find((s) => s.id === src.id);
     if (fresh) $('modalTitle').textContent = `Table — ${sourceLabel(fresh)}`;
   });

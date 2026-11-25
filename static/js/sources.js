@@ -23,6 +23,7 @@ import { syncSearchExpansion } from './search.js';
 import { openSessionManager } from './session.js';
 import { showGridTab, showSqlTab, showTimelineTab } from './sql.js';
 import { showNotesTab } from './notes.js';
+import { startJobsPoll } from './jobs.js';
 import { paintWatchlistBadge, refreshWatchlistBadge, showWatchlistTab, watchlistBadge } from './watchlist.js';
 import { dashDrag, loadDashboards, renderDashboardsInto, showDashboard } from './dashboard.js';
 import { openCaseSettings } from './settings.js';
@@ -153,6 +154,9 @@ export async function editSourceNickname(s) {
     return false;
   }
   await loadSources();
+  // A Row as JSON column that names its table is recomputed under the new
+  // name (Store._recompute_table_labels); the poll brings it into the grid.
+  startJobsPoll();
   return true;
 }
 

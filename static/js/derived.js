@@ -945,6 +945,10 @@ export async function openDerivedColumnModal(prefill, editing) {
       const op = currentOp();
       if (!op) return;
       for (const spec of op.params) {
+        // A hidden param is the server's to set (Row as JSON's From table
+        // column, which the merge says): nothing to draw, and on a
+        // Re-derive its value rides along in state.params as loaded.
+        if (spec.hidden) continue;
         // A chips widget can't live in a <label>: a label forwards a click
         // on its text (or on a chip's name) to its first labelable
         // descendant, which is the first chip's ✕ — clicking "Then try"

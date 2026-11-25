@@ -567,7 +567,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   failures, and its 'empty' type says nothing to the merge's typing.
   What is still refused: a column the merge doesn't have, and the
   merge's "From table" label (no member holds it, so the column would be
-  empty everywhere).
+  empty everywhere) for any op but one that reads it as the table's
+  name — next entry.
   Four places had to learn about it. **Re-derive** never checked inputs,
   because the backfill's "no such column" did; with missing inputs read
   as empty that would be a silently empty column, so
@@ -591,6 +592,44 @@ see [docs/notes/README.md](README.md) for the whole set.
   derived column found by `_find_column`, so a derive on the merge reads
   it there. Rare enough to leave, and it was the behavior before.
   tests/test_derived_merge_partial.py, test_merge_mismatched.py.
+- **Row as JSON can include a merge's "From table" column, as each
+  member's own name** (`timeparse.table_label_param` /
+  `table_label_input`, `Store._merge_derive_params`, `_input_ref`'s
+  `label`). The dialog lists every merge column for Row as JSON, From
+  table first, and Add column used to be refused on it. No member holds
+  that column — the merge projects each member's label as a constant
+  (`_member_projection`, `Store._table_label`: nickname, else file
+  name) — so a member's definition has nothing to read under that name.
+  An op opts in by declaring a param of type `table_label` (`hidden`,
+  so the dialog draws nothing; row_json's is `table_column`). On a merge
+  the store, never the caller, sets it to the input that is the merge's
+  source column (`_merge_derive_params`, on create, re-derive and the
+  merge preview; a value the caller sent is dropped first), and every
+  reader of the definition's inputs gives that input the table's label
+  as a SQL literal (`_input_ref(..., label=)`): the backfill (its own
+  slot, so the same name unmarked in another definition of the pass is
+  still a column), both multi-input previews, and `_had_input_sql`,
+  which leaves it out — every row has a name, and counting it would make
+  every row one that had input. The label wins over a member column of
+  the same name: on a "shared columns" merge a member can have a file
+  column called From table that the merge doesn't show, and the merge's
+  label still names the table. `_settle_table_label` drops the param
+  once it names no input (the analyst took From table out of the list).
+  It is a param rather than a rule about names because a member can be
+  in two merges whose source columns are spelled differently ("From
+  table 2" beside a file column called From table), and because it then
+  travels for free: sessions carry it in params with the label in
+  `absent_inputs`, and Re-derive on the member's own table sends it
+  back as loaded. **A rename recomputes it** (`set_source_nickname` →
+  `_recompute_table_labels`): the merge's From table column follows a
+  rename at once, being per query, but the JSON is stored, and a row
+  whose JSON names its table differently from its own From table cell
+  says something the case doesn't. One job per rename, its cascade
+  reaching anything derived from the JSON; a column still building is
+  left to its own job (two jobs on one column race), so a rename during
+  that job is the one Re-derive has to fix. Other ops still refuse the
+  column: a coalesce or regex over it is a feature of its own, and the
+  param is how one would opt in. tests/test_derived_row_json.py.
 - **A merge shows a derived column only some of its tables have, under
   "Keep every column"** (`_merge_columns`), empty in the others' rows,
   as a file column only some files have is. It used to need every

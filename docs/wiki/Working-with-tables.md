@@ -272,7 +272,7 @@ Columns are matched by name. The order doesn't matter, and case is ignored for A
 
 - **Keep every column** shows every column any of the tables has. A column only some tables have is empty in the rows from the others, and its header in the grid has a mark you can hover over to see which tables have it.
 - **Only shared columns** shows just the columns every table has.
-- The **From table** column shows which table each row came from, by its nickname if it has one. You can filter, sort and group by it like any other column.
+- The **From table** column shows which table each row came from, by its nickname if it has one. You can filter, sort and group by it like any other column, and include it in a [Row as JSON](Derived-columns.md#combining-columns) derived column.
 
 Only the columns the tables were imported with decide how the tables are grouped and how well they fit. [Derived columns](Derived-columns.md) come along like the others: **Keep every column** shows a column derived on any of the tables, empty in the rows of the others, and **Only shared columns** shows one only when every table has a derived column of that name. The preview's **Columns** tab marks each one **DERIVED**. You can also add one to a merge from any of its columns, including one only some of its tables have: the tables without it read it as empty (see [Derived columns on merged tables](Derived-columns.md#derived-columns-on-merged-tables)).
 
