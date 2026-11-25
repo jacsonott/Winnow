@@ -20,7 +20,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   analyst opts in per column (`timestamp_columns`, pre-checked by
   `preview_sqlite_tables`' heuristic when a column's name and sampled
   values look like one, via `_webkit_to_iso`) — never automatically, and
-  never in place in the source file. A BLOB value becomes `<N bytes>`
+  never in place in the source file. The conversion keeps every
+  microsecond, in integers (`…T13:07:00.123456Z`): it went through the
+  float `unix_us / 1_000_000` and was then cut to the millisecond, so
+  visits a few hundred microseconds apart imported as one time. A
+  converted column records `subsecond` on its column entry, as a derived
+  timestamp column does (docs/notes/derived.md), so the default display
+  shows its fraction; a column this import did not convert carries no
+  such key. A BLOB value becomes `<N bytes>`
   rather than attempting to stringify binary data. A TEXT value that is
   not valid UTF-8 is decoded with U+FFFD (`_lenient_text_factory`) and
   counted (`undecodable_values`, in the jobs toast and the log): sqlite3's

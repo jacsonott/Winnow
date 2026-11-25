@@ -762,6 +762,50 @@ see [docs/notes/README.md](README.md) for the whole set.
   own type, which is what every derived column read before any of this
   (tests/test_derived_types.py holds `Store()` and /api/case/open to
   returning while it is held).
+- **A timestamp column records how much of a second it carries, and the
+  default display format shows that much** (`derived_columns.subsecond`,
+  `Store._derived_subsecond`, tsformat.js's `withFraction`). The report
+  was "converting an epoch to a timestamp loses resolution past
+  seconds", and the stored value never did: `1764100000087` was
+  `2025-11-25 19:46:40.087000` all along, and the derive preview showed
+  it. But the grid shows a datetime column in the case's format, which
+  is `YYYY-MM-DD HH:MM:SS` unless someone changes it, so the column was
+  shown cut to the second, every row of a second alike. `subsecond` is
+  0, 3 (milliseconds) or 6 (finer), and only the inherited `'iso'` is
+  widened by it, to `iso_ms` or `iso_us`. Every other format is a choice
+  about precision or layout already (there is no US format with a
+  fraction to widen to), and a format picked on the column wins, which
+  is also how an analyst sees such a column to the second. The header
+  menu ticks what tsFormatFor returns, so it ticks the widened format.
+  Three choices worth keeping:
+    - **Read off the values, not the op's unit.** "auto" picks a unit
+      per value, a seconds column can carry a fraction on some rows
+      only, and FILETIME, WebKit and .NET write `.000000` for a whole
+      second. A fraction of all zeros is no fraction (a column of whole
+      seconds isn't shown with `.000` on every row), and digits past the
+      millisecond decide 3 against 6 over every value, never a sample:
+      a sample that called a microsecond column milliseconds would cut
+      digits off the rows it didn't read, and say nothing.
+    - **When it is read.** At the end of a pass, beside inferred_type
+      and under the same rules: NULL after a pass that failed and
+      cleared its values, read again after a cancel, and filled in by
+      the open-time pass (`_type_unlooked_derived_columns`, now two
+      kinds of look) for a case from before the column existed. Until
+      then the column is shown as before. Two GLOB scans in C, ordered
+      so the usual columns stop early (none: one scan of short values;
+      microseconds: the first value with one); a millisecond column is
+      the full scan.
+    - **Timestamp ops only.** A text op typed datetime by inferred_type
+      (a coalesce of TimeCreated and Created0x10) has subsecond NULL and
+      keeps the inherited format, so it shows each row as its own table's
+      column shows it. Widening it would make the coalesced column and
+      its inputs disagree on screen about the same stored value.
+  The merge's twin takes the most any member carries. The SQLite
+  import's Chrome-time conversion records the same key on the imported
+  column (`_subsecond_digits`, tallied as it converts), so a column
+  converted there is shown like one converted here; docs/notes/ingest.md.
+  Nanosecond epochs are still kept to the microsecond, the canonical
+  shape's six digits (`_parse_unix`).
 - **A custom pattern is one op, `custom_pattern`, and a saved format is
   that op with its pattern filled in** (`timeparse.compile_pattern`,
   `workspace.TimestampFormats`, `/api/timestamp_formats`). The column's
