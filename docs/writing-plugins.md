@@ -330,6 +330,15 @@ def parse(path, options) -> dict:
   moment the import returns: read the file inside `parse` and the rows
   it yields, never keep `path` for later. The table records the uploaded
   file's name as its path, not the spool's.
+- **A gzipped file arrives decompressed, under the name inside it.**
+  `hostd.0.gz` is routed to the format that claims `hostd.0` and `parse`
+  is given a decompressed copy called `hostd.0`, so reading meaning from
+  the name keeps working and nothing in a parser has to know about gzip.
+  The copy lives in a private temp directory for the duration of the
+  call, like an upload's spool, and the table records the `.gz`. A
+  format that wants to read compressed files ITSELF — a `.journal` with
+  XZ-compressed fields inside it, say — is unaffected: only a file whose
+  own bytes are a gzip stream is unwrapped (see `winnow/gzipped.py`).
 - **Cells may be `str`, `int`, `float`, or `None`.** Everything is
   stringified (`None` → `""`) because source columns are TEXT — the same
   evidence-fidelity rule the CSV path follows. Don't pre-format numbers

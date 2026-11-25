@@ -228,6 +228,21 @@ update.py          The CLI front door to updater.py — --check, --dry-run,
                     case, windows reload; docs/notes/server.md).
                     The one that still works when a bad update has broken
                     the UI, since it needs no running server.
+gzipped.py         One file compressed with gzip (events.json.gz,
+                    auth.log.1.gz) for import — read as the file INSIDE
+                    it. Routing is by name (inner_name; a .tar.gz is many
+                    files and stays archive.py's), decompressing by
+                    content (the first two bytes). Every reader wants a
+                    real file, so the import writes a decompressed copy
+                    into a private tempdir under the inner name — which
+                    is where an IIS format and a plugin's log type come
+                    from — and reads that; store.reads_gzipped wraps
+                    every ingest_* for it and the job worker does it once
+                    per job, with progress and a cancel point. The table
+                    records the .gz; its file_hash is the content's, so
+                    compressed and uncompressed copies of one file match.
+                    Stdlib only (gzip/zlib), imports archive.py and
+                    diskspace.py. See docs/notes/ingest.md.
 xlsxread.py        Excel .xlsx/.xlsm reading for import — a thin typed-cell→
                     TEXT layer over openpyxl's read-only mode (openpyxl is
                     already the XLSX export's writer, so this adds no

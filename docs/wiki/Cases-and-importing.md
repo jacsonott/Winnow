@@ -161,7 +161,9 @@ and it needs as much free disk space as the case file uses.
 **The evidence is never modified.** Files are opened read-only and their
 rows copied. Nothing is written beside a SQLite database either: one with an
 un-checkpointed `-wal` file is copied, with it, to a private temporary
-folder and read there, so those rows are included. The only import that
+folder and read there, so those rows are included. A gzipped file is
+decompressed into a temporary folder and read from there too (see
+[Gzipped single files](#gzipped-single-files)). The only import that
 writes near the evidence is an archive, which expands into a new folder
 beside itself (see [Archives](#archives)).
 
@@ -296,8 +298,8 @@ from the top:
 
 | Part | What it holds |
 | --- | --- |
-| **File** | Its name, the folder it is in, its size, and *read in place* (added from this machine) or *uploaded when it imports*. |
-| **Read as** | Only for a file that can be read more than one way: **Delimited**, **One line per row**, **Key=value** or **Body file** for delimited and other text; **JSON** or **One line per row**; **IIS log**, **Delimited** or **One line per row**; **Key=value**, **Delimited** or **One line per row** for a [key=value log](#fortigate-and-other-fortinet-logs); **Login records** or **One line per row** for [Linux login records](#linux-login-records-wtmp-btmp-utmp); **Body file**, **Delimited** or **One line per row** for a [body file](#body-files-tsk-and-mactime); **Secure log**, **Delimited** or **One line per row** for a [secure log or auth.log](#linux-secure-logs-and-authlog); a plugin's format or **One line per row** for an uploaded file a plugin claims, with **Secure log** between them when it is named like one. Delimited and other text can also be read as a **Secure log**. |
+| **File** | Its name, the folder it is in, its size, *gzip* for a [gzipped single file](#gzipped-single-files), and *read in place* (added from this machine) or *uploaded when it imports*. |
+| **Read as** | Only for a file that can be read more than one way: **Delimited**, **One line per row**, **Key=value** or **Body file** for delimited and other text; **JSON** or **One line per row**; **IIS log**, **Delimited** or **One line per row**; **Key=value**, **Delimited** or **One line per row** for a [key=value log](#fortigate-and-other-fortinet-logs); **Login records** or **One line per row** for [Linux login records](#linux-login-records-wtmp-btmp-utmp); **Body file**, **Delimited** or **One line per row** for a [body file](#body-files-tsk-and-mactime); **Secure log**, **Delimited** or **One line per row** for a [secure log or auth.log](#linux-secure-logs-and-authlog); a plugin's format or **One line per row** for an uploaded file a plugin claims, with **Secure log** between them when it is named like one. Delimited and other text can also be read as a **Secure log**. A [gzipped single file](#gzipped-single-files) adds **Archive**, for a tarball whose name doesn't say so. |
 | Settings | The reader's own: **Delimiter** (with **Custom** for one you type) and **Header**, JSON's **Nested objects**, an IIS log's **Format**, a secure log's **Year**, a plugin format's options. A file read one line per row has **Split each line on a delimiter…**. Plaso files, login records, body files, key=value logs and archives have none. |
 | **Preview** | The first 50 rows as they will import, a type picker in each column's heading where the type can be set, and a line under it saying what was detected. A SQLite file or workbook lists its **Tables** or **Sheets** here instead, to tick. |
 
@@ -392,7 +394,8 @@ folder inside `WS01`.
 | [Linux login records](#linux-login-records-wtmp-btmp-utmp) | named `wtmp`, `btmp`, `utmp`, `wtmp.1`, `btmp-20240501`…, or recognized by their records | One table, a row per login record. |
 | [Body files (TSK and mactime)](#body-files-tsk-and-mactime) | named `bodyfile`, `bodyfile.txt`, `*.body`, or recognized by the first line | One table, a row per file, its four times in UTC. |
 | [Linux secure logs and auth.log](#linux-secure-logs-and-authlog) | named `secure`, `auth.log`, `secure-20240505`, `auth.log.1`… | One table, a row per line, with the event, user, source IP and command read out. |
-| [Archives](#archives) | `.zip` `.tar` `.tgz` `.gz` `.tbz2` `.txz` `.bz2` `.xz` | A folder, then folder import. |
+| [Gzipped single files](#gzipped-single-files) | `.gz` over any of the above: `events.json.gz`, `auth.log.1.gz` | Whatever the file inside it gives. |
+| [Archives](#archives) | `.zip` `.tar` `.tgz`/`.tar.gz` `.tbz2` `.txz` `.bz2` `.xz` | A folder, then folder import. |
 | [Any other text](#plain-text-and-log-files) | `.log`, `.1`, no extension… | One row per line. |
 | [Plugin formats](#plugin-formats) | raw `$MFT` and `$J`, ESXi and UAC logs | Whatever the plugin parses. |
 
@@ -718,8 +721,8 @@ Linux keeps its login history in three binary files that share one format:
 Winnow recognizes them by name: `wtmp`, `btmp` and `utmp`, the rotated copies
 logrotate leaves (`wtmp.1`, `btmp-20240501`, `wtmp.1.old`), and a second copy
 an archive expansion renamed (`wtmp (2)`). A gzipped rotation such as
-`btmp.1.gz` is an [archive](#archives): it expands, and the file inside is
-recognized. A copy saved under another name (`evidence.bin`) is recognized by
+`btmp.1.gz` is read as the file inside it (see
+[Gzipped single files](#gzipped-single-files)). A copy saved under another name (`evidence.bin`) is recognized by
 its records rather than skipped as binary. The queue says *Login records ·
 wtmp* under its name. Newer distributions' `wtmp.db` (wtmpdb) is a SQLite
 database, and imports as [one](#sqlite-databases).
@@ -865,8 +868,8 @@ Nov 19 10:44:02 web01 sudo:    alice : TTY=pts/0 ; PWD=/home/alice ; USER=root ;
 Winnow recognizes them by name: `secure` and `auth.log`, the rotated copies
 logrotate leaves (`secure-20240505`, `secure.1`, `auth.log.1`), and a second
 copy an archive expansion renamed (`secure (2)`, `auth (2).log`). A gzipped
-rotation such as `auth.log.2.gz` is an [archive](#archives): it expands, and
-the file inside is recognized. The queue says *Secure log · a row per line*
+rotation such as `auth.log.2.gz` is read as the file inside it (see
+[Gzipped single files](#gzipped-single-files)). The queue says *Secure log · a row per line*
 under its name. Any other text file, such as `messages` or a secure log
 saved under another name, can be read as one with **Read as** →
 **Secure log**.
@@ -923,7 +926,9 @@ the first line · blank: 2025, from the file’s modified date (2026-01-05)*.
 Type the year of the first line there to set it instead, for a file whose
 modified date was lost when it was copied. A file added from this machine
 keeps its own date; an uploaded file sends the date the browser sees, and
-files inside an archive keep the dates the archive stored. The year the
+files inside an archive keep the dates the archive stored. A gzipped log
+is dated by the date gzip stored for the log it compressed, which is what
+logrotate leaves behind, or else by the `.gz`'s own. The year the
 first line got is kept with the table, so reopening a saved session dates
 every line the same way. The import toast says when the year came from the
 file's date. A date that never happened, such as Feb 29 in a year without
@@ -976,12 +981,56 @@ longer than one character (see
 In [folder import](#folders-and-kape-output), **Split other text on** does
 the same for every file the **other text files** type brings in.
 
+### Gzipped single files
+
+One file compressed with gzip — `events.json.gz`, `hosts.tsv.gz`,
+`auth.log.1.gz`, `History.db.gz` — imports as the file inside it, read by
+the reader that file would have had uncompressed. There is nothing to
+expand and nothing to unzip first: queue it like any other file.
+
+**The name inside decides**, so `.json.gz` is JSON, `.tsv.gz` is split on
+tabs, `u_ex240501.log.gz` is an IIS log, `wtmp.gz` is login records,
+`auth.log.1.gz` is a secure log, `History.db.gz` lists its tables to pick,
+and `messages.gz` — nothing inside its name — imports one line per row.
+A file whose first line says what it is (a [key=value
+log](#fortigate-and-other-fortinet-logs), a [body
+file](#body-files-tsk-and-mactime)) is recognized from inside the
+compressed file too.
+
+The queue says *gzip* after how the file will be read (*Delimited ·
+auto-detect · gzip*), the pane's **File** row says it too, and the
+**Preview** is of the file inside. The table records the `.gz` you pointed
+at as where it came from, and its fingerprint is the one the uncompressed
+file has — so a [session](Sessions-and-export.md) recorded by someone who
+had `events.json` matches your import of `events.json.gz`.
+
+Winnow decompresses the file into a temporary folder when it imports,
+reads that copy and deletes it; nothing is written beside the evidence,
+and the `.gz` itself is never touched. The copy is the full uncompressed
+size, so there has to be room for it on the drive the temporary folder is
+on. While it is being made, the jobs panel says *decompressing* with the
+progress through the compressed file, and **✕** cancels it then as during
+any other import.
+
+- **A tarball is not one file**: `.tar.gz` and `.tgz` hold many, and they
+  go through [Archives](#archives) below. A tarball named `collection.gz`,
+  without the `.tar`, is recognized by what is in it: added from this
+  machine it queues as an archive by itself, and an uploaded one can be
+  switched with **Read as → Archive**.
+- A damaged or cut-short `.gz` imports nothing and says so, rather than
+  leaving a table that looks complete; the message names the file.
+  Decompress it yourself (`gzip -d`, 7-Zip) and import what comes out.
+- A file that decompresses to more than 32 GB is refused as a
+  decompression bomb.
+- `.bz2`, `.xz` and `.zst` single files are not supported — only gzip.
+  A single-file `.bz2` or `.xz` is not an archive either.
+
 ### Archives
 
 `.zip`, `.tar`, `.tgz`/`.tar.gz`, `.tbz2`/`.tar.bz2` and `.txz`/`.tar.xz`
-archives and single gzipped files (`hostd.0.gz`) expand, then import. A
-`.bz2` or `.xz` that is a single compressed file, not a tarball, is not
-supported.
+archives expand, then import. A `.bz2` or `.xz` that is a single
+compressed file, not a tarball, is not supported; a single gzipped file is
+read directly (see [Gzipped single files](#gzipped-single-files)).
 
 **Import N files** expands the archive into a new folder named after it
 (`bundle.tgz` → `bundle-extracted`) — beside the archive when added from
@@ -1073,7 +1122,10 @@ output with `EventLogs` and `FileSystem` subfolders gives `DC01`,
 `DC01 / EventLogs` and `DC01 / FileSystem`. A file already imported from that path shows *already in case*
 and starts unticked. Plugin-claimed files use the plugin's default options.
 SQLite files and workbooks are never picked up and archives in the folder are
-not expanded; import those on their own. The scan stops at 5,000 files and
+not expanded; import those on their own. A [gzipped single
+file](#gzipped-single-files) is matched by the type inside it, so
+`events.csv.gz` comes in with the **.csv** type ticked and
+`auth.log.1.gz` with **secure logs**. The scan stops at 5,000 files and
 says so.
 
 **Profiles.** **Save as profile…** stores the file types, patterns,

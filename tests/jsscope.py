@@ -48,6 +48,9 @@ BROWSER_GLOBALS = {
     "localStorage", "sessionStorage", "fetch", "Headers", "Request", "Response",
     "FormData", "Blob", "File", "FileReader", "URL", "URLSearchParams", "AbortController", "BroadcastChannel",
     "Uint8Array", "ArrayBuffer", "DataView", "TextDecoder",
+    # Gzip, natively: the import queue reads inside a .gz to say how it
+    # will be read (importer.js's inflateHead, which checks for it).
+    "DecompressionStream",
     "XMLHttpRequest", "WebSocket", "EventSource", "ClipboardItem", "DataTransfer",
     "setTimeout", "clearTimeout", "setInterval", "clearInterval",
     "requestAnimationFrame", "cancelAnimationFrame", "requestIdleCallback",

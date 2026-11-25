@@ -579,6 +579,28 @@ export const PLASO_IMPORT_EXTENSIONS = ['.plaso'];
    winnow/archive.py); .gz covers .tar.gz and bare rotated logs alike. */
 export const ARCHIVE_IMPORT_EXTENSIONS = ['.zip', '.tar', '.tgz', '.gz', '.bz2', '.xz', '.tbz2', '.txz'];
 
+/* A gzipped SINGLE file — events.json.gz, auth.log.1.gz, what an analyst
+   is sent when a log was too big to mail — is read as the file INSIDE it
+   (the server decompresses a copy: winnow/gzipped.py), so it is routed by
+   the name inside it: `.json.gz` is JSON, `u_ex240501.log.gz` an IIS log,
+   `messages.gz` one line per row. The twin of gzipped.inner_name, and the
+   one rule that matters here: a TARBALL (.tar.gz, .tgz) is many files,
+   not one, and stays the archive flow's — as does a bare `.gz` whose
+   content turns out to be a tar, which only the server can see
+   (/api/ingest/recognise says so for a file read in place). */
+export const GZIP_IMPORT_EXTENSION = '.gz';
+
+export function gzipInner(filename) {
+  const base = String(filename || '').split(/[\\/]/).pop();
+  if (!base.toLowerCase().endsWith(GZIP_IMPORT_EXTENSION)) return null;
+  const inner = base.slice(0, -GZIP_IMPORT_EXTENSION.length);
+  return !inner || inner.toLowerCase().endsWith('.tar') ? null : inner;
+}
+
+/* The name a file is routed by: the name inside a gzipped single file,
+   else its own. */
+export const importRoutingName = (filename) => gzipInner(filename) || filename;
+
 export function extOf(filename) {
   const i = filename.lastIndexOf('.');
   return i === -1 ? '' : filename.slice(i).toLowerCase();
@@ -740,22 +762,25 @@ export function secureLogNamed(filename) {
 }
 
 export function importKindFor(filename) {
+  // A gzipped single file is routed as the file inside it (gzipInner);
+  // a tarball keeps its own name and falls out as 'archive' below.
+  const name = importRoutingName(filename);
   // Before the extension checks: an IIS log's .log says nothing, and a
   // wtmp, a bodyfile or a secure log has no extension at all.
-  if (iisLogFormat(filename)) return 'iis';
-  if (utmpFileKind(filename)) return 'utmp';
-  if (bodyfileNamed(filename)) return 'bodyfile';
-  if (secureLogNamed(filename)) return 'secure';
-  if (SQLITE_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'sqlite';
-  if (XLSX_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'xlsx';
-  if (PLASO_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'plaso';
-  if (ARCHIVE_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'archive';
-  const ext = extOf(filename).slice(1); // drop the leading '.' — json/jsonl/ndjson below are bare
+  if (iisLogFormat(name)) return 'iis';
+  if (utmpFileKind(name)) return 'utmp';
+  if (bodyfileNamed(name)) return 'bodyfile';
+  if (secureLogNamed(name)) return 'secure';
+  if (SQLITE_IMPORT_EXTENSIONS.includes(extOf(name))) return 'sqlite';
+  if (XLSX_IMPORT_EXTENSIONS.includes(extOf(name))) return 'xlsx';
+  if (PLASO_IMPORT_EXTENSIONS.includes(extOf(name))) return 'plaso';
+  if (ARCHIVE_IMPORT_EXTENSIONS.includes(extOf(name))) return 'archive';
+  const ext = extOf(name).slice(1); // drop the leading '.' — json/jsonl/ndjson below are bare
   if (ext === 'json' || ext === 'jsonl' || ext === 'ndjson') return 'json';
   // Anything no built-in claims is raw text — one line per row (see
   // Store.ingest_text): auth.log.1, hostd.log, an extensionless dump.
   // Plugin formats are consulted before this by queueItem.
-  return RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(filename)) ? 'csv' : 'text';
+  return RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(name)) ? 'csv' : 'text';
 }
 
 /* Key=value logs (FortiGate's, and the other Fortinet products') have no
