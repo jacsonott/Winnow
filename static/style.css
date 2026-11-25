@@ -3826,6 +3826,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .tm-layout-copy .mb-notes[hidden] { display: none; }
 .tm-layout-summary { flex: 1 1 auto; min-width: 0; color: var(--text); }
 .tm-layout-view { flex: 0 0 auto; margin-left: auto; }
+.tm-layout-view[hidden] { display: none; }
 .tm-layout-view button { font-size: 11px; padding: 3px 10px; }
 .table-menu-pane .tm-layout-preview { flex: 1 1 0; min-height: 0; }
 .tm-layout-same { margin: 2px 6px 8px; }

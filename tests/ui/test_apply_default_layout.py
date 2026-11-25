@@ -63,9 +63,12 @@ def _save_default(page):
 
 
 def _apply_default(page):
-    """The section opens on the saved default once it has been found;
-    Apply to this table puts it on the table."""
+    """The section opens on this table as it is; picking the saved
+    default under Showing previews it, and Apply to this table puts it on
+    the table."""
     _layout_section(page)
+    page.wait_for_function("() => !document.querySelector('.tm-layout-from option[value=default]').disabled")
+    page.locator(".tm-layout-from").select_option("default")
     page.wait_for_function("""() => {
       const s = document.querySelector('.tm-layout-from');
       const b = [...document.querySelectorAll('#modalBody .btn')].find((x) => x.textContent === 'Apply to this table');
@@ -211,6 +214,8 @@ def test_applying_while_grouped_keeps_the_grouped_column_out_until_ungrouped(pag
         page.evaluate("() => __winnow.addGroupLevel('AdlHost')")
         page.wait_for_function("() => !document.querySelector('.hcell[data-col=\"AdlHost\"]')")
         _layout_section(page)
+        page.wait_for_function("() => !document.querySelector('.tm-layout-from option[value=default]').disabled")
+        page.locator(".tm-layout-from").select_option("default")
         page.wait_for_function("() => !document.querySelector('.tm-layout-preview.stale')"
                                " && document.querySelector('.copy-layout-col')?.dataset.col === 'AdlCmd'")
         # All columns, not just the ones that change: the grouped column

@@ -2221,10 +2221,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   `copiedOrder`, `copiedColumns`). The header-set default only matches
   identical column sets, and saving one changes what every later import
   opens to, which is wrong for "make this table look like that one". The
-  section's "From" lists the default, then tables sharing at least one
-  column, the same header set first, then by columns shared. Shared columns take the other table's order and per-column
-  entry outright (no entry there clears this table's, or a width it never
-  had would survive the copy); a column only this table has keeps its
+  section's "Showing" list starts on this table as it is, then the
+  default, then tables sharing at least one column, the same header set
+  first, then by columns shared. Shared columns take the other table's
+  order and per-column entry outright (no entry there clears this
+  table's, or a width it never had would survive the copy); a column only this table has keeps its
   entry and goes right after the column it follows now, so a derived
   column stays beside its input and an extra column beside its
   neighbour. The other table's order is its saved layout, or its columns
@@ -2246,8 +2247,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   layout" now, under Columns, in two blocks that each carry their own
   button: the default for this header set (what it is for, whether this
   table matches it, and the button that writes it), then copying a
-  layout onto this table (the From list, what would change, Apply to
-  this table). The save button used to sit under the preview of ANOTHER
+  layout onto this table (the Showing list, what would change, Apply to
+  this table). **The Showing list opens on "This table, as it is now"**,
+  with this table's own columns under it and nothing to apply, and stays
+  there until the analyst picks something: it used to open on the
+  default once found, or on the first other table when none was saved,
+  so the pane's first sight was a different table's layout under this
+  table's name — the maintainer's account of what confused people. The
+  default and the tables are under "Copy …" optgroups, so the list says
+  that picking one means copying it. The save button used to sit under the preview of ANOTHER
   layout, as "Save this layout as the default", where "this layout" read
   as the previewed one; it is in the default's card now and says
   "Replace the default with this table's layout" once one is saved, so

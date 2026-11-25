@@ -1279,10 +1279,16 @@ async function layoutHint() {
      matches it, and saving this table's layout as it. Its button used to
      sit under the preview of ANOTHER layout, as "Save this layout as the
      default", where "this layout" read as the one previewed.
-   - Copying a layout onto this table: from the default or another table
-     (one list, so the default gets the preview copying always had; Copy
-     layout from another table… was its own dialog until this replaced
-     it), what would change, and Apply to this table.
+   - Copying a layout onto this table. The list opens on THIS table as it
+     is now, and the preview under it is this table's own columns: the
+     list used to open on the default, or on the first other table when
+     there was none, so the pane's first sight was another table's layout
+     under this table's name, which is what people found confusing. The
+     default and the other tables are further down the list, each under a
+     "Copy …" heading (one list, so the default gets the preview copying
+     always had; Copy layout from another table… was its own dialog until
+     this replaced it); picking one shows what copying it would change,
+     and Apply to this table does it.
 
    It was "Layout" under This table, beside Show, hide & order under
    Columns: two names for the one thing, and the one called Layout was the
@@ -1312,20 +1318,29 @@ export function buildLayoutPanel(container) {
   const copy = el('div', 'tm-layout-block tm-layout-copy');
   copy.append(el('div', 'tm-layout-head', 'Copy a layout onto this table'));
   const from = el('select', 'tm-layout-from');
-  from.setAttribute('aria-label', 'Copy the layout from');
+  from.setAttribute('aria-label', 'Showing');
+  // This table first, and chosen: what the pane shows until the analyst
+  // asks for something else.
+  from.append(new Option('This table, as it is now', 'current'));
+  const dfltGroup = el('optgroup');
+  dfltGroup.label = 'Copy the default';
   const dfltOpt = new Option(`The default for ${setName || these} — looking…`, 'default');
   dfltOpt.disabled = true;
-  from.append(dfltOpt);
+  dfltGroup.append(dfltOpt);
+  from.append(dfltGroup);
+  const groupLabel = { [LAYOUT_SAME]: 'Copy from a table with the same columns',
+    [LAYOUT_SOME]: 'Copy from a table with some of these columns' };
   for (const group of [LAYOUT_SAME, LAYOUT_SOME]) {
     const members = others.filter((e) => e.group === group);
     if (!members.length) continue;
     const og = el('optgroup');
-    og.label = group;
+    og.label = groupLabel[group];
     for (const e of members) og.append(new Option(`${e.label} — ${e.hint}`, e.key));
     from.append(og);
   }
+  from.value = 'current';
   const fromRow = el('div', 'tm-layout-from-row');
-  fromRow.append(el('label', null, 'From'), from);
+  fromRow.append(el('label', null, 'Showing'), from);
   const notes = el('ul', 'mb-notes');
   const title = el('div', 'side-preview-title');
   const summary = el('span', 'tm-layout-summary');
@@ -1381,7 +1396,6 @@ export function buildLayoutPanel(container) {
 
   save.onclick = oneAtATime(save, async () => {
     if (!(await saveDefaultLayout())) return;
-    picked = false;
     loadDefault();
     changed();
   });
@@ -1394,10 +1408,11 @@ export function buildLayoutPanel(container) {
       dfltOpt.textContent = f
         ? `The default for ${setName || these}`
         : `The default for ${setName || these} — none saved yet`;
-      // The saved default is the first place to look, until the analyst
-      // has picked another.
-      if (f && !picked) from.value = 'default';
-      else if (!f && from.value === 'default' && others.length) from.value = others[0].key;
+      // The list stays where it is: on this table unless the analyst has
+      // picked something else. (It used to jump to the default once found,
+      // or to another table, which is the confusion this pane was rebuilt
+      // for.) Only a default that has gone away moves it, back here.
+      if (!f && from.value === 'default') from.value = 'current';
       paintState();
       preview();
     }).catch(() => { found = null; if (box.isConnected) { paintState(); preview(); } });
@@ -1405,7 +1420,8 @@ export function buildLayoutPanel(container) {
 
   function paintRows() {
     if (!diff) return;
-    const shown = layoutPreviewAll || !diff.changed ? diff.cols : diff.cols.filter((c) => c.what.length);
+    const own = from.value === 'current';
+    const shown = own || layoutPreviewAll || !diff.changed ? diff.cols : diff.cols.filter((c) => c.what.length);
     const list = el('div', 'copy-layout-cols');
     for (const c of shown) {
       const r = el('div', 'copy-layout-col' + (c.hidden ? ' hidden-col' : '') + (c.what.length ? ' tm-changed' : ''));
@@ -1421,7 +1437,7 @@ export function buildLayoutPanel(container) {
       if (c.what.length) r.append(el('span', 'tm-change', changeWords(c)));
       list.append(r);
     }
-    if (!diff.changed) {
+    if (!diff.changed && !own) {
       // An empty box under "Applying it changes nothing" says nothing; the
       // columns it would leave (which are the ones on screen) say what the
       // layout the analyst is looking at actually is.
@@ -1436,11 +1452,31 @@ export function buildLayoutPanel(container) {
     apply.disabled = true;
     box.classList.add('stale');
     let order, layout, line, message;
+    if (key === 'current' || !key) {
+      // This table as it is: its own columns, nothing to apply, and where
+      // to look for something to copy.
+      diff = layoutChanges(S.order, S.layout);
+      const shownCols = diff.cols.filter((c) => !c.hidden).length;
+      const pinnedCols = diff.cols.filter((c) => c.pinned).length;
+      summary.textContent = `This table as it is now: ${shownCols} of ${plural(diff.cols.length, 'column')} shown`
+        + (pinnedCols ? `, ${pinnedCols} pinned.` : '.');
+      view.seg.hidden = true;
+      const nothing = found === null && !others.length;
+      notes.replaceChildren(...(nothing ? [el('li', null,
+        'Nothing to copy a layout from yet: no default is saved for these columns, and no other table shares any of them.')] : []));
+      notes.hidden = !nothing;
+      undoNote.textContent = nothing ? '' : 'To copy another layout onto this table, pick it under Showing.';
+      paintRows();
+      box.classList.remove('stale');
+      return;
+    }
+    view.seg.hidden = false;
+    undoNote.textContent = 'Undo comes up in the message after applying.';
     if (key === 'default' && found) {
       ({ order, layout } = defaultLayoutResult(found));
       line = null;   // the card above already says what the default is
       message = 'Copied the default layout for these columns onto this table';
-    } else if (key && key !== 'default') {
+    } else if (key !== 'default') {
       const entry = others.find((e) => e.key === key);
       if (!layouts.has(entry.src.id)) {
         layouts.set(entry.src.id, api(`/api/layout?source_id=${entry.src.id}`).catch(() => ({})));
@@ -1458,35 +1494,30 @@ export function buildLayoutPanel(container) {
           : `The ${own} columns only this table has stay beside the columns they follow`}.` : '');
       message = `Copied the layout of ${entry.label} onto this table`;
     } else {
-      notes.replaceChildren(el('li', null, 'Nothing to copy a layout from yet: no default is saved for these columns, and no other table shares any of them.'));
-      notes.hidden = false;
-      from.disabled = true;
-      summary.textContent = '';
-      rows.replaceChildren();
-      box.classList.remove('stale');
+      // The default, chosen while it was still being looked for: the
+      // answer re-runs this.
       return;
     }
     notes.replaceChildren(...(line ? [el('li', null, line)] : []));
     notes.hidden = !line;
     diff = layoutChanges(order, layout);
     summary.textContent = diff.changed
-      ? `Applying it changes ${diff.changed} of ${plural(diff.cols.length, 'column')}: ${changeCounts(diff.counts)}.`
-      : 'Applying it changes nothing.';
+      ? `Copying it changes ${diff.changed} of ${plural(diff.cols.length, 'column')}: ${changeCounts(diff.counts)}.`
+      : 'Copying it changes nothing.';
     paintRows();
     box.classList.remove('stale');
     result = { order, layout, message };
     apply.disabled = !diff.changed;
   }
 
-  let picked = false;
-  from.onchange = () => { picked = true; preview(); };
+  from.onchange = () => preview();
   apply.onclick = () => {
     if (!result || S.sourceId !== id) return;
     closeModal();
     replaceLayout(result.order, result.layout, result.message);
   };
-  if (others.length) from.value = others[0].key;
   paintState();
+  preview();
   loadDefault();
 }
 

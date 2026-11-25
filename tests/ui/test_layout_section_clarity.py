@@ -1,5 +1,13 @@
-"""The table menu's Save & copy layout section says which way each half
-goes, and what applying would do in words.
+"""The table menu's Save & copy layout section opens on the table's own
+layout, says which way each half goes, and what applying would do in
+words.
+
+What was confusing people, in the maintainer's words: the dropdown. It
+opened on the saved default, or, with none saved, on the first OTHER
+table, so the first thing the pane showed under this table's name was a
+different table's layout. It opens on "This table, as it is now" with
+this table's own columns under it, and shows another layout only once
+one is picked.
 
 The report was that the table layout menu confused people. Reading the
 section it was, three things did it. It was called "Layout" under "This
@@ -91,6 +99,22 @@ def test_the_two_directions_are_separate_and_each_carries_its_own_button(page, a
         assert dflt.locator(".tm-layout-preview").count() == 0
         assert copy.locator("button.primary").inner_text() == "Apply to this table"
 
+        # The symptom: with another table sharing every column and no
+        # default saved, the list opened on THAT table. It opens on this
+        # one, listing this table's own columns, with nothing to apply.
+        assert page.locator(".tm-layout-from").input_value() == "current"
+        assert page.locator(".tm-layout-from option:checked").inner_text() == "This table, as it is now"
+        page.wait_for_function("() => !document.querySelector('.tm-layout-preview.stale')")
+        assert page.locator(".copy-layout-col").evaluate_all("(rs) => rs.map((r) => r.dataset.col)") \
+            == page.evaluate("() => [...__winnow.S.order]")
+        assert page.locator(".tm-layout-summary").inner_text().startswith("This table as it is now: 4 of 4 columns shown")
+        assert page.locator("#modalBody .btn", has_text="Apply to this table").is_disabled()
+        assert page.locator(".copy-layout-col.tm-changed").count() == 0
+        # The other table is still in the list, under a heading that says
+        # picking it means copying it.
+        assert page.locator('.tm-layout-from optgroup[label="Copy from a table with the same columns"] option',
+                            has_text="lc_b.csv").count() == 1
+
         # No default saved yet: the card says so, and the side list too.
         assert "No default is saved" in dflt.locator(".tm-layout-state").inner_text()
         page.wait_for_function("() => document.querySelector('.side-rail-item[data-section=\"layout\"]"
@@ -151,6 +175,11 @@ def test_a_table_that_differs_is_told_how_far_and_in_what_words(page, api, tmp_p
                       " __winnow.renderHead(); __winnow.saveLayout(); }", HEADERS)
         layout_saved()
         _section(page)
+        # It opens on this table even with a default saved: the default is
+        # one pick away, not what the pane shows first.
+        assert page.locator(".tm-layout-from").input_value() == "current"
+        page.wait_for_function("() => !document.querySelector('.tm-layout-from option[value=default]').disabled")
+        page.locator(".tm-layout-from").select_option("default")
         page.wait_for_function("() => !document.querySelector('.tm-layout-preview.stale')")
         # The card counts the difference rather than just saying one exists,
         # and offers to replace the default rather than to "save" over it
@@ -160,7 +189,7 @@ def test_a_table_that_differs_is_told_how_far_and_in_what_words(page, api, tmp_p
         assert page.locator(".tm-layout-default button").inner_text() == "Replace the default with this table’s layout"
 
         summary = page.locator(".tm-layout-summary").inner_text()
-        assert summary.startswith("Applying it changes 3 of 4 columns:"), summary
+        assert summary.startswith("Copying it changes 3 of 4 columns:"), summary
         assert "1 hidden" in summary and "1 pinned" in summary, summary
 
         # Only the changed columns are listed, each saying what happens to
@@ -186,8 +215,10 @@ def test_a_table_that_differs_is_told_how_far_and_in_what_words(page, api, tmp_p
         layout_saved()
         _section(page)
         page.wait_for_function("() => /matches the default/.test(document.querySelector('.tm-layout-state').textContent)")
+        page.wait_for_function("() => !document.querySelector('.tm-layout-from option[value=default]').disabled")
+        page.locator(".tm-layout-from").select_option("default")
         page.wait_for_function("() => !document.querySelector('.tm-layout-preview.stale')")
-        assert page.locator(".tm-layout-summary").inner_text() == "Applying it changes nothing."
+        assert page.locator(".tm-layout-summary").inner_text() == "Copying it changes nothing."
         assert page.locator("#modalBody .btn", has_text="Apply to this table").is_disabled()
         # Nothing changes, so the box shows the layout rather than nothing.
         assert "already has this layout" in page.locator(".tm-layout-same").inner_text()
