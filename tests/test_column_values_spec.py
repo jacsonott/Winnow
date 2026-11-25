@@ -221,3 +221,20 @@ def test_the_route_refuses_what_the_analyst_can_fix(client, table):
     missing = client.post("/api/column_values", json={
         "source_id": sid, "column": "Nope", "spec": _spec(sid, search="x")})
     assert missing.status_code == 404
+
+
+def test_equal_counts_list_in_the_same_order_before_and_after_the_index(store, write_csv):
+    """Ties by value. Without it, equal counts came out in the GROUP BY's
+    order, which the column index changes when it finishes building in the
+    background: WS02 and DC01 (2 each) swapped between two opens of the
+    same list, and test_the_route failed whenever its two calls straddled
+    the build."""
+    sid = _ingest(store, write_csv, ROWS + ROWS_B[1:], "both.csv")
+    store._ensure_column_index_building = lambda *a, **k: None   # no index yet
+    before = store.column_values(sid, "Host")
+    del store._ensure_column_index_building
+    store.column_values(sid, "Host")
+    store.wait_for_column_index(sid, "Host", timeout=30)
+    after = store.column_values(sid, "Host")
+    assert before == after
+    assert [r["value"] for r in after] == ["WS01", "DC01", "WS02", ""]

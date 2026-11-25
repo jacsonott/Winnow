@@ -67,7 +67,7 @@ When a filter can't run, such as a regular expression with a syntax error, Winno
 
 ## The value picker
 
-The ▾ beside a column's filter box opens the value picker. It lists the column's distinct values with a count for each, most common first. Tick the values you want and click **Apply** (or press `Enter`). You can also open it with `v` for the column under the cell cursor.
+The ▾ beside a column's filter box opens the value picker. It lists the column's distinct values with a count for each, most common first. Values with the same count are listed by value, so their order is the same every time you open it. Tick the values you want and click **Apply** (or press `Enter`). You can also open it with `v` for the column under the cell cursor.
 
 ![The value picker](../screenshots/value-picker.png)
 
