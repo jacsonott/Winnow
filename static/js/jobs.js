@@ -480,6 +480,11 @@ export function jobDoneDetail(j) {
    in (#528). The phase is also the badge's class, so these two words
    are the only ones a running job's badge can carry. */
 export function runningJobPhase(j) {
+  // A gzipped file is decompressed before anything is parsed, which on a
+  // multi-GB .gz is minutes with no rows yet: the bar is the compressed
+  // bytes read, and the phase says so rather than showing "importing"
+  // over a row count that hasn't moved (Store.start_ingest_job).
+  if (j.decompressing) return 'decompressing';
   return j.kind === 'derive' ? 'deriving' : 'importing';
 }
 

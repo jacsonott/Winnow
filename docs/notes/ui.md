@@ -2199,8 +2199,8 @@ see [docs/notes/README.md](README.md) for the whole set.
     case's Browse… passes the dialog's group rather than the open case's.
   tests/test_case_group_folders.py, tests/ui/test_group_folder_ui.py.
 - **A header set's default layout seeds a table once, so it needs its
-  own way onto the rest** (the table menu's Layout section with the
-  default chosen; columns.js `applyDefaultLayout` is the same as a
+  own way onto the rest** (the table menu's Save & copy layout section
+  with the default chosen; columns.js `applyDefaultLayout` is the same as a
   keymap action, unbound by default). `openSource` reads the default only
   when the table has no layout of its own, and almost every table has one
   by the second visit: a resize, a sort, a hidden column and Reset view
@@ -2212,7 +2212,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   entry and re-places it beside its input with `placeUnorderedColumns`
   (the same helper `openSource` uses), and offers Undo, since nothing
   else brings back the layout it replaced. `defaultLayoutResult` is that
-  computation, shared by applying and the Layout section's preview. A
+  computation, shared by applying and the section's preview. A
   grouped table needs nothing extra: grouped columns stay in `S.order`
   and `visibleCols()` leaves them out (the preview leaves them out too).
   tests/ui/test_apply_default_layout.py.
@@ -2221,11 +2221,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   `copiedOrder`, `copiedColumns`). The header-set default only matches
   identical column sets, and saving one changes what every later import
   opens to, which is wrong for "make this table look like that one". The
-  Layout section's "Take the layout from" lists the default, then tables
-  sharing at least one column, the same header set first, then by columns
-  shared. Shared columns take the other table's order and per-column
-  entry outright (no entry there clears this table's, or a width it never
-  had would survive the copy); a column only this table has keeps its
+  section's "Showing" list starts on this table as it is, then the
+  default, then tables sharing at least one column, the same header set
+  first, then by columns shared. Shared columns take the other table's
+  order and per-column entry outright (no entry there clears this
+  table's, or a width it never had would survive the copy); a column only this table has keeps its
   entry and goes right after the column it follows now, so a derived
   column stays beside its input and an extra column beside its
   neighbour. The other table's order is its saved layout, or its columns
@@ -2236,9 +2236,43 @@ see [docs/notes/README.md](README.md) for the whole set.
   change**: shown, hidden, pinned, unpinned, width (`w`), and "moved" for
   the columns outside the longest run still in their old relative order
   (`movedColumns`), since comparing positions marks every column after
-  one dragged to the top as moved too. Apply layout is greyed when
+  one dragged to the top as moved too. Apply to this table is greyed when
   nothing would change. Applying goes through `replaceLayout`, which
   offers Undo. tests/ui/test_copy_layout_from_table.py.
+- **The section is named for both directions and keeps them apart**
+  (`buildLayoutPanel`, `layoutChanges`, `layoutHint`). It was "Layout",
+  under "This table", beside "Show, hide & order" under "Columns": two
+  names for one subject, and the one called Layout was the one that lays
+  nothing out by hand — the reported confusion. It is "Save & copy
+  layout" now, under Columns, in two blocks that each carry their own
+  button: the default for this header set (what it is for, whether this
+  table matches it, and the button that writes it), then copying a
+  layout onto this table (the Showing list, what would change, Apply to
+  this table). **The Showing list opens on "This table, as it is now"**,
+  with this table's own columns under it and nothing to apply, and stays
+  there until the analyst picks something: it used to open on the
+  default once found, or on the first other table when none was saved,
+  so the pane's first sight was a different table's layout under this
+  table's name — the maintainer's account of what confused people. The
+  default and the tables are under "Copy …" optgroups, so the list says
+  that picking one means copying it. The save button used to sit under the preview of ANOTHER
+  layout, as "Save this layout as the default", where "this layout" read
+  as the previewed one; it is in the default's card now and says
+  "Replace the default with this table's layout" once one is saved, so
+  an overwrite is never silent. Three things follow from `layoutChanges`,
+  which is the one diff of a candidate layout against the table: the
+  card's "differs in N columns" line and the side list's hint (Matches /
+  Differs / No default saved, where it used to say only whether a
+  default existed), the summary line's count by kind ("9 hidden, 5
+  moved, 1 pinned"), and the preview rows. A change is said AS a change
+  — "gets hidden", "moves to 3rd" — because the old preview marked a
+  change with the same word, in the same place, that an unchanged hidden
+  column used for its state. The preview opens on the changed columns
+  alone (What changes) with All columns beside it, kept in a module-level
+  flag for the session; when nothing changes it lists every column under
+  the "already has this layout" line rather than leaving an empty box.
+  `saveDefaultLayout` returns whether the save landed, so the card only
+  re-reads the default when it did. tests/ui/test_layout_section_clarity.py.
 - **Names in Name & merge save as they are typed**, the way the tag
   editor saves: Enter or leaving the box saves, Escape takes back the
   edit (and stops there, so the dialog stays open). The table's nickname

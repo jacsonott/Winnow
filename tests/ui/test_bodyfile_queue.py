@@ -60,9 +60,11 @@ def test_the_client_recognizes_what_the_server_does(page):
     assert any(named) and not all(named)
     # A name that says it is one is the body file reader's outright; one
     # under another name is only asked about where kvCandidate says so.
+    # Gzipped, it is routed by the name inside: bodyfile.gz is a body file
+    # (test_gzip_queue.py), and only a tarball is still an archive.
     kinds = page.evaluate("(names) => names.map((n) => __winnow.importKindFor(n))",
-                          ["bodyfile", "bodyfile.txt", "mft.body", "fls.txt", "bodyfile.gz"])
-    assert kinds == ["bodyfile", "bodyfile", "bodyfile", "csv", "archive"]
+                          ["bodyfile", "bodyfile.txt", "mft.body", "fls.txt", "bodyfile.gz", "bodyfile.tar.gz"])
+    assert kinds == ["bodyfile", "bodyfile", "bodyfile", "csv", "bodyfile", "archive"]
     item = page.evaluate("() => __winnow.queueItem({ path: '/x/bodyfile' }, 'bodyfile')")
     assert item["kind"] == "bodyfile" and item["configured"] is True
     # The folder-import chip is on in the defaults, and says what it is.

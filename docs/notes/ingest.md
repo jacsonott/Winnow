@@ -1,4 +1,4 @@
-# Ingest: CSV, raw text, JSON, SQLite, Excel, Plaso, IIS logs, key=value logs, login records, body files, secure logs, archives, folders, drops, jobs
+# Ingest: CSV, raw text, JSON, SQLite, Excel, Plaso, IIS logs, key=value logs, login records, body files, secure logs, gzipped files, archives, folders, drops, jobs
 
 Every path that turns a file on disk into a `src_<id>` table, and the
 background-job machinery all of them run through. Invariant #1 (source
@@ -107,6 +107,59 @@ see [docs/notes/README.md](README.md) for the whole set.
   macros never executed); legacy binary `.xls` is deliberately out of
   scope. Like SQLite files, workbooks are excluded from directory import
   — which sheets to pull is a per-file choice.
+- **A gzipped single file** (`winnow/gzipped.py`) is read as the file
+  inside it, by the reader that file's NAME asks for: `events.json.gz` is
+  json, `u_ex240501.log.gz` an IIS log, `hostd.0.gz` the esxi_logs
+  plugin's, `messages.gz` raw text. Two rules, deliberately split:
+  **routing is by name** (`inner_name`/`routing_name`, whose one job is to
+  refuse a TARBALL — `.tar.gz` and `.tgz` are many files and stay
+  archive.py's), **decompressing is by content** (`is_gzip`: the first two
+  bytes, so a gzip stream under any name is unwrapped and a `.gz` that
+  isn't one is read as it is). The client keeps the same split
+  (merge.js's `gzipInner`, `importKindFor`).
+  Every reader wants a real file on disk — JSON's two passes, an encoding
+  sniff that seeks, sqlite3 and openpyxl, a plugin parser that takes a
+  path — so the import writes a decompressed copy into a private mkdtemp
+  under the INNER name and reads that: the name is where an IIS format, a
+  SQLite table's `<stem>.<table>` default name and a plugin's log type
+  come from. **Where the decompression happens is two places on purpose.**
+  `reads_gzipped` wraps every `Store.ingest_*` that takes a path, so the
+  by-path routes, a session re-import and the association quick look all
+  work without remembering to; the JOB WORKER decompresses first (one
+  copy for a multi-table sqlite/xlsx job, a progress bar and a cancel
+  point while it runs), which makes the decorator a two-byte check there.
+  The table records the `.gz`, not the copy — `recorded_path`, the
+  mechanism an upload's spool already uses, in a `finally` so rows a
+  failed read kept say so too.
+  **`file_hash` is the hash of the CONTENT** (the copy's), so the same
+  evidence has one fingerprint compressed or not and a session recorded
+  against `events.json` matches a case that imported `events.json.gz`;
+  `_content_hash` is what re-checks a path that way
+  (`_reimport_session_source` compares it before reading, and would
+  otherwise refuse every gzipped source it was asked to re-import).
+  Two tables sharing a hash is already handled — invariant #10 tells them
+  apart by name, columns and row count.
+  Untrusted input, so: the decompressed size is counted as it is written
+  and stops at archive.py's 32 GB cap (`MAX_BYTES`, read inside
+  `decompress` rather than bound as a default argument so a test can
+  lower it), damage is a `GzipError` (a ValueError → 400 / a job error)
+  with nothing imported and no partial copy — archive.py's rule, since a
+  truncated file imports as if it were whole — and a disk-full OSError is
+  let out as itself for diskspace.py to word. The probes that say what a
+  file IS read inside it too (`looks_binary` first of all: compressed
+  bytes are full of NULs, so every `.gz` was turned away as binary by the
+  "other text files" gate), and the previews read a bounded DECOMPRESSED
+  head (`head_and_end`, `inflate_head` for an upload's compressed head)
+  with `complete` meaning "the stream ended in it" rather than "shorter
+  than the cap". `_read_head` uses `read1`, not `read`: a buffered
+  `read(n)` keeps going until it has n bytes, so a damaged stream raised
+  with everything it had decompressed still in the buffer and a preview
+  of it showed nothing at all. The folder scan matches by the inner
+  extension (`events.csv.gz` under `.csv`), and the browser inflates a
+  picked file's head itself with `DecompressionStream` — native, so the
+  airgap rule holds — to recognise a compressed FortiGate log or a
+  renamed wtmp before it uploads. tests/test_gzip_import.py,
+  tests/ui/test_gzip_queue.py.
 - Archive expansion (`expand_archive`, winnow/archive.py) is how support
   bundles and UAC collections come in: zip/tar/tgz/gz expand RECURSIVELY
   (per-subsystem tgz inside the bundle, gzipped rotated logs) into a

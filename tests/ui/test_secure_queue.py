@@ -41,9 +41,11 @@ def test_the_client_recognizes_what_the_server_does(page):
     named = page.evaluate("(names) => names.map((n) => __winnow.secureLogNamed(n))", NAMES)
     assert named == [secureread.name_says(n) for n in NAMES]
     assert any(named) and not all(named)
+    # Gzipped, it is routed by the name inside: secure.gz is a secure log
+    # (test_gzip_queue.py), and only a tarball is still an archive.
     kinds = page.evaluate("(names) => names.map((n) => __winnow.importKindFor(n))",
-                          ["secure", "auth.log.1", "secure.gz", "messages", "secure.txt"])
-    assert kinds == ["secure", "secure", "archive", "text", "csv"]
+                          ["secure", "auth.log.1", "secure.gz", "secure.tar.gz", "messages", "secure.txt"])
+    assert kinds == ["secure", "secure", "secure", "archive", "text", "csv"]
     item = page.evaluate("() => __winnow.queueItem({ path: '/x/secure' }, 'secure')")
     assert item["kind"] == "secure" and item["configured"] is True and item["year"] is None
     # The folder-import chip is on in the defaults, and says what it is.

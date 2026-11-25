@@ -42,7 +42,8 @@ def test_the_foot_holds_the_three_everyday_actions_under_every_section(page):
         body = page.locator("#modalBody .table-menu-pane").inner_text()
         assert "Tables manager" not in body, section
         if section == "layout":
-            assert "Save this layout as the default" in body
+            # Its own save button, in the Default card, not on this strip.
+            assert page.locator(".tm-layout-default button").count() == 1
 
 
 @pytest.fixture

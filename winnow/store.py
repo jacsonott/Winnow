@@ -57,6 +57,7 @@ from . import decode  # noqa: F401 — registers the decode ops (URL decode) the
 from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 from . import timeparse
 from . import diskspace
+from . import gzipped
 from . import iisread
 from . import kvread
 from . import bodyread
@@ -1373,10 +1374,13 @@ def looks_binary(path: str) -> bool:
     turn an .exe or an .evtx into a million rows of mojibake. A UTF-16 BOM
     is exempt: that encoding IS text with NULs in it (sniff_text_encoding
     reads it correctly). BOM-less UTF-16 reads as binary here, which is
-    the same "left alone" call sniff_text_encoding makes."""
+    the same "left alone" call sniff_text_encoding makes.
+
+    A gzipped file is judged by what is INSIDE it (gzipped.head — every
+    probe here is), since compressed bytes are always full of NULs: a
+    rotated auth.log.1.gz would have been turned away as binary."""
     try:
-        with open(path, "rb") as f:
-            head = f.read(8192)
+        head = gzipped.head(path, 8192)
     except OSError:
         return False
     if head[:2] in (b"\xff\xfe", b"\xfe\xff"):
@@ -1394,11 +1398,12 @@ def looks_like_utmp(path: str) -> bool:
     records (utmpread.looks_like) — wtmp copied out as evidence.bin. Asked
     about the same files looks_like_kv_log is (a name no reader claims), so
     a renamed wtmp is read as one instead of refused as binary. Reads the
-    first utmpread.PROBE_BYTES, the import queue's own probe size."""
+    first utmpread.PROBE_BYTES, the import queue's own probe size — of
+    what is inside a gzipped file (wtmp.gz), whose records are what the
+    layout has to be read off."""
     try:
-        with open(path, "rb") as f:
-            size = os.fstat(f.fileno()).st_size
-            head = f.read(utmpread.PROBE_BYTES)
+        head, ended = gzipped.head_and_end(path, utmpread.PROBE_BYTES)
+        size = len(head) if ended else (gzipped.uncompressed_size(path) or os.path.getsize(path))
     except OSError:
         return False
     return utmpread.looks_like(head, size)
@@ -1409,13 +1414,13 @@ def looks_like_bodyfile(path: str) -> bool:
     (bodyread.looks_like): an fls -m listing saved as anything.txt, or
     with no extension. Asked about the same files looks_like_kv_log is,
     after it (a FortiGate line is never a body file line, or the other
-    way round), and decoded as the import would decode it."""
+    way round), and decoded as the import would decode it — from inside a
+    gzipped file (bodyfile.txt.gz), as every probe here reads."""
     try:
-        with open(path, "rb") as f:
-            head = f.read(KV_PROBE_BYTES)
+        head, ended = gzipped.head_and_end(path, KV_PROBE_BYTES)
     except OSError:
         return False
-    text, _ = decode_text_sample(head, complete=len(head) < KV_PROBE_BYTES)
+    text, _ = decode_text_sample(head, complete=ended)
     return bodyread.looks_like(text)
 
 
@@ -1426,13 +1431,13 @@ def looks_like_kv_log(path: str) -> bool:
     by its name (it would be raw text, or a .txt sniffed as delimited) —
     the server's router, the folder scan, the import queue's
     /api/ingest/recognise — and before plugin formats, as an IIS name is.
-    Decoded as the import would decode it."""
+    Decoded as the import would decode it, from inside a gzipped file
+    (a FortiGate log arrives rotated as often as not)."""
     try:
-        with open(path, "rb") as f:
-            head = f.read(KV_PROBE_BYTES)
+        head, ended = gzipped.head_and_end(path, KV_PROBE_BYTES)
     except OSError:
         return False
-    text, _ = decode_text_sample(head, complete=len(head) < KV_PROBE_BYTES)
+    text, _ = decode_text_sample(head, complete=ended)
     return kvread.looks_like(text)
 
 
@@ -3486,6 +3491,48 @@ def case_session_document_problem(doc: Any) -> str | None:
     return None
 
 
+def reads_gzipped(method):
+    """Wraps an ``ingest_*(path, ...)`` so that a gzipped single file —
+    ``events.json.gz``, ``auth.log.1.gz`` — is read from a decompressed
+    copy in a private temp directory (winnow/gzipped.py), removed when the
+    import returns. Every reader in the app wants a real file on disk, and
+    the copy is written under the INNER name, which is what the readers
+    recognised by name (an IIS log's format, a workbook sheet's
+    ``<stem>.<sheet>`` name, a plugin's log type) read their meaning from.
+
+    One decorator rather than a line in each caller: the import jobs, a
+    session re-import, the file-association quick look and the by-path
+    routes all hand a path to these methods, and a reader that only
+    worked compressed from the one caller that remembered is worse than
+    none. The job worker decompresses first anyway (one copy for a
+    multi-table job, plus progress and cancellation while it runs), which
+    makes this a cheap two-byte check there.
+
+    The TABLE still records the ``.gz`` it came from, not the copy — the
+    mechanism an upload's spool already uses (``record_upload_path``), in
+    a ``finally`` so rows a failed read committed say so too. Its
+    ``file_hash`` is the copy's: the fingerprint of the CONTENT, so the
+    same evidence has one fingerprint compressed or not and a session
+    recorded against ``events.json`` matches a case that imported
+    ``events.json.gz`` (invariant #10 — the hash names the file, and two
+    tables sharing one are already told apart by name, columns and row
+    count)."""
+    @functools.wraps(method)
+    def wrapper(self, path, *args, **kwargs):
+        if not path or not gzipped.is_gzip(path):
+            return method(self, path, *args, **kwargs)
+        real_path = os.path.abspath(path)
+        with gzipped.decompressed(path) as real:
+            try:
+                rec = method(self, real, *args, **kwargs)
+            finally:
+                with contextlib.suppress(sqlite3.Error):
+                    self.record_upload_path(real, real_path)
+        rec["path"] = real_path
+        return rec
+    return wrapper
+
+
 class Store:
     FTS_BUILD_CONCURRENCY = 2  # trigram builds are CPU/writer-bound; more just thrash
 
@@ -5500,6 +5547,7 @@ class Store:
             with self.lock, self.db:
                 self.db.execute("PRAGMA synchronous=NORMAL")
 
+    @reads_gzipped
     def ingest_csv(
         self,
         path: str,
@@ -5721,6 +5769,7 @@ class Store:
         rec["encoding"], rec["cp1252_bytes"] = decoded["encoding"], decoded["cp1252_bytes"]
         return rec
 
+    @reads_gzipped
     def ingest_text(self, path: str, name: str | None = None, build_fts: bool = True,
                     progress=None, cancel=None) -> dict:
         r"""Import a file as raw text: one row per physical line, the whole
@@ -5847,6 +5896,7 @@ class Store:
         return {"delimiter": None, "columns": [TEXT_COLUMN],
                 "sample_rows": [[ln] for ln in lines], "inferred_types": ["text"]}
 
+    @reads_gzipped
     def ingest_iis(self, path: str, name: str | None = None, build_fts: bool = True,
                    progress=None, cancel=None, log_format: str | None = None,
                    column_types: dict[str, str] | None = None) -> dict:
@@ -5875,6 +5925,7 @@ class Store:
         rec["log_format"] = fmt
         return rec
 
+    @reads_gzipped
     def ingest_kv(self, path: str, name: str | None = None, build_fts: bool = True,
                   progress=None, cancel=None, column_types: dict[str, str] | None = None) -> dict:
         """Import a key=value log — FortiGate's and the other Fortinet
@@ -5897,6 +5948,7 @@ class Store:
             ingest=_ingest_record("kv", column_types=column_types or None),
             column_types=column_types, build_fts=build_fts, progress=progress, cancel=cancel)
 
+    @reads_gzipped
     def ingest_bodyfile(self, path: str, name: str | None = None, build_fts: bool = True,
                         progress=None, cancel=None) -> dict:
         """Import a body file (TSK's fls -m, UAC's bodyfile.txt, MFTECmd
@@ -5923,6 +5975,7 @@ class Store:
                                 f"{'were' if n != 1 else 'was'} kept whole in the {bodyread.UNPARSED} column")
         return rec
 
+    @reads_gzipped
     def ingest_secure(self, path: str, name: str | None = None, build_fts: bool = True,
                       progress=None, cancel=None, year: int | None = None) -> dict:
         """Import a Linux authentication log (/var/log/secure, auth.log) as
@@ -6352,6 +6405,14 @@ class Store:
         return {"delimiter": delimiter, "columns": cols, "sample_rows": sample, "inferred_types": types}
 
     def preview_sqlite_tables(self, path: str) -> dict:
+        """_preview_sqlite_tables, from a decompressed copy when the file
+        is gzipped (History.db.gz): sqlite3 opens files, not streams. The
+        import decompresses again — two passes over a .gz rather than a
+        copy kept behind the analyst's back until something cleans it up."""
+        with gzipped.decompressed(path) as real:
+            return self._preview_sqlite_tables(real)
+
+    def _preview_sqlite_tables(self, path: str) -> dict:
         """Read-only look at every table in an uploaded/pointed-to SQLite
         file — Chromium's History/Cookies/Web Data/... or any other
         .db/.sqlite — for the import UI's table picker: names, row counts,
@@ -6407,6 +6468,7 @@ class Store:
             ro.close()
             cleanup()
 
+    @reads_gzipped
     def ingest_sqlite_table(
         self,
         path: str,
@@ -6538,6 +6600,7 @@ class Store:
                                 f"{'s' if undecodable[0] != 1 else ''} not valid UTF-8 — imported with \ufffd")
         return rec
 
+    @reads_gzipped
     def ingest_plaso(
         self,
         path: str,
@@ -6626,6 +6689,7 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         return rec
 
+    @reads_gzipped
     def ingest_utmp(
         self,
         path: str,
@@ -6722,13 +6786,24 @@ class Store:
     @staticmethod
     def preview_utmp_file(path: str, max_rows: int = 50) -> dict:
         """The first records of a login-records file as ingest_utmp will
-        make them — read from the file's head, never the whole file."""
-        size = os.path.getsize(path)
-        with open(path, "rb") as fh:
-            head = fh.read(max(utmpread.SNIFF_BYTES, max_rows * utmpread.LAYOUTS[1].size))
-        return utmpread.preview(head, size, os.path.basename(path), max_rows=max_rows)
+        make them — read from the file's head, never the whole file. From
+        INSIDE a gzipped one (wtmp.gz): the records are what the layout is
+        read off, and the record count comes from gzip's own trailer
+        rather than the compressed size."""
+        want = max(utmpread.SNIFF_BYTES, max_rows * utmpread.LAYOUTS[1].size)
+        head, ended = gzipped.head_and_end(path, want)
+        size = len(head) if ended else (gzipped.uncompressed_size(path) or os.path.getsize(path))
+        return utmpread.preview(head, size, os.path.basename(gzipped.routing_name(path)), max_rows=max_rows)
 
     def preview_xlsx_sheets(self, path: str) -> dict:
+        """_preview_xlsx_sheets, from a decompressed copy when the file is
+        gzipped (book.xlsx.gz): a workbook is a zip, whose central
+        directory sits at the END of the file, so openpyxl needs the real
+        file — the same reason the upload preview spools the whole thing."""
+        with gzipped.decompressed(path) as real:
+            return self._preview_xlsx_sheets(real)
+
+    def _preview_xlsx_sheets(self, path: str) -> dict:
         """Read-only look at every data sheet in an Excel workbook, in the
         exact shape preview_sqlite_tables returns ({"tables": [...]}) so
         the import UI's picker renders both from one code path — a sheet
@@ -6745,6 +6820,7 @@ class Store:
             "likely_timestamp_columns": [],
         } for sh in sheets]}
 
+    @reads_gzipped
     def ingest_xlsx_sheet(
         self,
         path: str,
@@ -6893,6 +6969,15 @@ class Store:
     def preview_json_file(
         self, path: str, flatten_mode: str = "none", flatten_depth: int = 0, max_rows: int = 50
     ) -> dict:
+        """_preview_json_file, from a decompressed copy when the file is
+        gzipped (events.json.gz): the pass below reads the whole document,
+        and so does the import after it."""
+        with gzipped.decompressed(path) as real:
+            return self._preview_json_file(real, flatten_mode, flatten_depth, max_rows)
+
+    def _preview_json_file(
+        self, path: str, flatten_mode: str = "none", flatten_depth: int = 0, max_rows: int = 50
+    ) -> dict:
         """Read-only sample for the import preview UI — same shape as
         preview_csv_text (columns/sample_rows/inferred_types), plus
         record_count so the UI can show how many rows the real ingest will
@@ -6934,6 +7019,7 @@ class Store:
                                                      _cp1252_fallback_count() - fallback0).items()
                    if k != "meta"}}
 
+    @reads_gzipped
     def ingest_json(
         self,
         path: str,
@@ -7328,12 +7414,19 @@ class Store:
                     excluded.append({"path": fpath, "rel_path": rel, "reason": "not a regular file"})
                     continue
                 entry = {"path": fpath, "rel_path": rel, "size_bytes": st.st_size}
-                ext = os.path.splitext(fname)[1].lower()
-                is_iis = iisread.log_format(fname) is not None
-                is_utmp = utmpread.log_kind(fname) is not None
-                is_body = bodyread.name_says(fname)
-                is_secure = secureread.name_says(fname)
-                by_filename_pattern = any(fnmatch.fnmatch(fname.lower(), p.lower()) for p in fname_pats)
+                # A gzipped single file is matched and read as the file
+                # INSIDE it (gzipped.routing_name): events.csv.gz is a
+                # .csv, auth.log.1.gz a secure log, hostd.0.gz a plugin's.
+                # A tarball (.tar.gz, .tgz) is many files and stays
+                # archive.py's — routing_name leaves its name alone, so it
+                # falls out at the extension gate as it always did.
+                inner = gzipped.routing_name(fname)
+                ext = os.path.splitext(inner)[1].lower()
+                is_iis = iisread.log_format(inner) is not None
+                is_utmp = utmpread.log_kind(inner) is not None
+                is_body = bodyread.name_says(inner)
+                is_secure = secureread.name_says(inner)
+                by_filename_pattern = any(fnmatch.fnmatch(inner.lower(), p.lower()) for p in fname_pats)
                 by_ext = ext in exts
                 unclaimed = (not by_ext and not by_filename_pattern and not (is_iis and iis_logs)
                              and not (is_utmp and utmp_logs) and not (is_body and body_files)
@@ -7449,6 +7542,16 @@ class Store:
         BATCH; a cancelled ingest *drops* its partial source (see
         ingest_csv).
 
+        A **gzipped single file** (events.json.gz, auth.log.1.gz) is
+        decompressed into a private temp directory first and the reader
+        named by `kind` reads that copy, which is removed when the job
+        ends; the table records the .gz. `kind` is the inner file's —
+        callers route by the inner name (gzipped.routing_name,
+        server._ingest_kind_for_path). While the copy is being made the job
+        is `decompressing` and its units are the COMPRESSED bytes read, so
+        a multi-GB .gz has a progress bar before any row exists; the
+        reader's own progress takes over from the first batch.
+
         'derive' is the odd one out: no file at all (`path` is ''), it
         backfills one derived column's values from a column already in the
         case. It rides this machinery rather than growing a second job
@@ -7487,6 +7590,14 @@ class Store:
                 "kind": kind,
                 "name": name or os.path.basename(path),
                 "path": path,
+                # What the readers actually read: `path`, or the
+                # decompressed copy the worker makes of a gzipped single
+                # file (winnow/gzipped.py). Never what a table records.
+                "read_path": path,
+                # True only while that copy is being made — no rows exist
+                # yet, so the jobs panel says "decompressing", not
+                # "importing" with a stalled row count.
+                "decompressing": False,
                 "status": "queued",
                 "rows_done": 0,
                 "units_done": 0,
@@ -7533,12 +7644,19 @@ class Store:
         return "Derive" if job.get("kind") == "derive" else "Import"
 
     def _ingest_job_worker(self, job: dict) -> None:
-        acquired = False
         # The tables this job has made so far. A multi-table job (SQLite,
         # Excel) appends one per table, so a cancel or a failure part way
         # still knows which ones finished — they stay (see below), and they
         # are filed where the import was asked to put them.
         results: list[dict] = []
+        # Holds a gzipped file's decompressed copy for the whole job (one
+        # copy, however many tables come out of it) and removes it on every
+        # way out, cancel and crash included.
+        with contextlib.ExitStack() as stack:
+            self._run_ingest_job(job, results, stack)
+
+    def _run_ingest_job(self, job: dict, results: list[dict], stack: contextlib.ExitStack) -> None:
+        acquired = False
         try:
             self._ingest_sem.acquire()
             acquired = True
@@ -7559,10 +7677,40 @@ class Store:
                     job["units_done"] = units
                     job["units_total"] = units_total
 
+            def inflating(done: int, total: int) -> None:
+                # The compressed bytes read so far: progress while nothing
+                # has been parsed yet, and the cancel point — a 30 GB .gz
+                # spends minutes here before the first row exists.
+                if job["cancelled"]:
+                    raise IngestCancelled("cancelled while decompressing")
+                with self._ingest_jobs_lock:
+                    job["units_done"] = done
+                    job["units_total"] = total
+
             opts = job["options"]
+            # A gzipped single file (events.json.gz) is read from a
+            # decompressed copy in a private temp directory, removed on the
+            # way out — every reader below wants a real file on disk (two
+            # passes over JSON, an encoding sniff that seeks, SQLite and
+            # workbooks, a plugin parser that takes a path). The table still
+            # records the .gz it came from: `recorded_path`, the mechanism
+            # an upload already uses for its spool. See winnow/gzipped.py.
+            if job["kind"] != "derive" and gzipped.is_gzip(job["path"]):
+                with self._ingest_jobs_lock:
+                    job["decompressing"] = True
+                read_path = stack.enter_context(gzipped.decompressed(
+                    job["path"], job["recorded_path"] or job["path"], on_chunk=inflating))
+                with self._ingest_jobs_lock:
+                    job["decompressing"] = False
+                    job["read_path"] = read_path
+                    # The spool is deleted when the job ends, so an upload
+                    # already records the name the browser sent; a file read
+                    # in place records itself rather than the copy.
+                    job["recorded_path"] = job["recorded_path"] or job["path"]
+            read_path = job["read_path"]
             if job["kind"] == "csv":
                 results = [self.ingest_csv(
-                    job["path"], name=job["name"],
+                    read_path, name=job["name"],
                     delimiter=opts.get("delimiter"), build_fts=opts.get("build_fts", True),
                     has_header=opts.get("has_header", True), column_types=opts.get("column_types"),
                     progress=progress, cancel=cancel,
@@ -7604,44 +7752,44 @@ class Store:
                 return
             elif job["kind"] == "text":
                 results = [self.ingest_text(
-                    job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
+                    read_path, name=job["name"], build_fts=opts.get("build_fts", True),
                     progress=progress, cancel=cancel,
                 )]
             elif job["kind"] == "plaso":
                 results = [self.ingest_plaso(
-                    job["path"], name=job["name"],
+                    read_path, name=job["name"],
                     build_fts=opts.get("build_fts", True),
                     progress=progress, cancel=cancel,
                 )]
             elif job["kind"] == "iis":
                 results = [self.ingest_iis(
-                    job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
+                    read_path, name=job["name"], build_fts=opts.get("build_fts", True),
                     progress=progress, cancel=cancel, log_format=opts.get("log_format"),
                     column_types=opts.get("column_types"),
                 )]
             elif job["kind"] == "utmp":
                 results = [self.ingest_utmp(
-                    job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
+                    read_path, name=job["name"], build_fts=opts.get("build_fts", True),
                     progress=progress, cancel=cancel,
                 )]
             elif job["kind"] == "kv":
                 results = [self.ingest_kv(
-                    job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
+                    read_path, name=job["name"], build_fts=opts.get("build_fts", True),
                     progress=progress, cancel=cancel, column_types=opts.get("column_types"),
                 )]
             elif job["kind"] == "bodyfile":
                 results = [self.ingest_bodyfile(
-                    job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
+                    read_path, name=job["name"], build_fts=opts.get("build_fts", True),
                     progress=progress, cancel=cancel,
                 )]
             elif job["kind"] == "secure":
                 results = [self.ingest_secure(
-                    job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
+                    read_path, name=job["name"], build_fts=opts.get("build_fts", True),
                     progress=progress, cancel=cancel, year=opts.get("year"),
                 )]
             elif job["kind"] == "json":
                 results = [self.ingest_json(
-                    job["path"], name=job["name"],
+                    read_path, name=job["name"],
                     flatten_mode=opts.get("flatten_mode", "none"),
                     flatten_depth=opts.get("flatten_depth", 0),
                     build_fts=opts.get("build_fts", True),
@@ -7656,23 +7804,24 @@ class Store:
                         job["tables_done"] = i
                     if job["kind"] == "sqlite":
                         results.append(self.ingest_sqlite_table(
-                            job["path"], t["table"], name=t.get("name"),
+                            read_path, t["table"], name=t.get("name"),
                             build_fts=opts.get("build_fts", True),
                             timestamp_columns=t.get("timestamp_columns"),
                             progress=progress, cancel=cancel,
                         ))
                     else:
                         results.append(self.ingest_xlsx_sheet(
-                            job["path"], t["table"], name=t.get("name"),
+                            read_path, t["table"], name=t.get("name"),
                             build_fts=opts.get("build_fts", True),
                             progress=progress, cancel=cancel,
                         ))
                     with self._ingest_jobs_lock:
                         job["tables_done"] = i + 1
             # Before the job reads as done, so the source list the client
-            # fetches on that never shows the spool's path.
+            # fetches on that never shows the spool's path — or a gzipped
+            # file's decompressed copy, which is as temporary.
             if job["recorded_path"] is not None:
-                self.record_upload_path(job["path"], job["recorded_path"])
+                self.record_upload_path(job["read_path"], job["recorded_path"])
             # The table folder the analyst chose in the import dialog
             # (folder_id), and under it, for a directory import, the folder
             # that mirrors the file's on-disk path (folder_path, created
@@ -7775,7 +7924,7 @@ class Store:
         # this (the failure may have been the database itself) is not.
         if job.get("recorded_path") is not None:
             with contextlib.suppress(sqlite3.Error):
-                self.record_upload_path(job["path"], job["recorded_path"])
+                self.record_upload_path(job["read_path"], job["recorded_path"])
 
     def _file_job_results_quietly(self, job: dict, results: list[dict]) -> None:
         """File a job's tables under the folder it was asked for. Never the
@@ -7835,7 +7984,7 @@ class Store:
         keys = ("job_id", "kind", "name", "status", "rows_done", "units_done",
                 "units_total", "unit", "tables_done", "tables_total", "current_table",
                 "source_ids", "result", "error", "error_kind", "cancelled", "started_at",
-                "finished_at")
+                "finished_at", "decompressing")
         with self._ingest_jobs_lock:
             return {k: job[k] for k in keys}
 
@@ -8128,6 +8277,16 @@ class Store:
         except csv.Error:
             first = head.splitlines()[0] if head else ""
             return max(",\t;|", key=first.count)
+
+    def _content_hash(self, path: str) -> str:
+        """_quick_hash of what a reader will actually read: the
+        decompressed content of a gzipped single file. What an import of
+        that file records (reads_gzipped hashes the copy), so a session's
+        fingerprint and a re-import's agree — and a gzip stream has no
+        random access, which is why this is a whole pass and _quick_hash
+        is two reads."""
+        with gzipped.decompressed(path) as real:
+            return self._quick_hash(real)
 
     @staticmethod
     def _quick_hash(path: str) -> str:
@@ -18637,7 +18796,7 @@ class Store:
             return None, (f"'{label}' isn't in this case, and it {why}, so Winnow can't re-import it "
                           f"from {path}. Import it yourself, then load the session again.")
         try:
-            have = self._quick_hash(path)
+            have = self._content_hash(path)
         except OSError as e:
             return None, f"Could not re-import '{label}': {e}"
         if not want or have != want:
@@ -18687,7 +18846,9 @@ class Store:
         (server._ingest_kind_for_path, minus plugins), for a session saved
         before sources.ingest existed. A SQLite file or workbook holds
         several tables and the old session didn't say which, so those get
-        no guess at all."""
+        no guess at all. A gzipped file is guessed from the name inside
+        it, as every router does (gzipped.routing_name)."""
+        path = gzipped.routing_name(path)
         ext = os.path.splitext(path)[1].lower()
         if ext in SQLITE_IMPORT_EXTENSIONS or ext in XLSX_IMPORT_EXTENSIONS:
             return {}
