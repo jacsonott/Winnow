@@ -274,6 +274,21 @@ table has), re-derive on the merge and on a member, the "Show N unparsed
 rows" fragment on a member that lacks an input, a session carrying the
 inputs a table lacks (and still refusing one it does not vouch for), and
 the canonical-timestamp typing rule case by case.
+`test_derived_coalesce_timestamps.py` is the report that followed it:
+the two timestamp columns showed alike in the grid but stored their times
+in different shapes, and the coalesce came out text with both shapes as
+stored. A merge of three shapes (EvtxECmd's, ISO with a Z, US with a
+12-hour clock, whose 2023 stamp sorts last as text) sorted, filtered and
+charted by time; the merge preview judging each table on its own inputs;
+one table's two shapes, an offset applied; a value that isn't a time
+passed over and a row with none counted; a text input keeping the copy; a
+Parse-a-timestamp column counting as datetime; a re-derive rewriting an
+old text column; the plain merge of same-named columns in two shapes,
+which was always datetime; and `canonical_timestamp` shape by shape,
+including what it refuses. `tests/ui/test_coalesce_timestamp_shapes_ui.py`
+asserts the symptom in the grid: each row of the coalesced column shows
+the text its own table's column shows, and sorting by it puts the US row
+between the two ISO ones.
 `test_merge_partial_derived.py` is the report that derived columns were
 missing from a merge: a column derived on only some of a merge's tables,
 with the FIRST member lacking it so nothing leans on members[0], run

@@ -9728,6 +9728,19 @@ class Store:
             return "NULL"
         return self._col_ref(src, column, alias) if alias else self._col_ref(src, column)
 
+    def _multi_input_state(self, src: dict, inputs: list[str]) -> dict:
+        """The `state` a multi-input op starts from on table `src`: its
+        inputs in order (row_json's keys) and each one's type there, None
+        for one the table lacks (_input_ref reads it as empty). Coalesce
+        reads the types: over datetime columns only it writes each time
+        canonical, so the column is a datetime column however each input
+        stores its times (combine._coalesce). Per table, so a merge's
+        members are each judged on the columns they have, the way each
+        member's backfill reads them; the backfill and both previews build
+        it here so they cannot disagree."""
+        return {"inputs": list(inputs),
+                "input_types": [(self._find_column(src, c) or {}).get("type") for c in inputs]}
+
     def _define_derived_column(self, source_id: int, name: str, input_column: str,
                                op_id: str, params: dict | None,
                                absent: Iterable[str] = ()) -> int:
@@ -10611,10 +10624,12 @@ class Store:
                 inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d["params"])
                 # state["inputs"]: the ordered column names behind the values
                 # parse_multi receives — an op that needs them (row_json's keys)
-                # reads them here rather than growing a second calling shape.
+                # reads them here rather than growing a second calling shape;
+                # state["input_types"] their types on this table (coalesce's
+                # timestamps; _multi_input_state).
                 # Multi-input ops only: a stateful single-input op (syslog's
                 # year rollover) takes an empty dict as "fresh" and seeds it.
-                state = {"inputs": list(inputs)} if op["multi_input"] else {}
+                state = self._multi_input_state(src, inputs) if op["multi_input"] else {}
                 plans.append({"d": d, "op": op, "state": state, "slots": [slot(c) for c in inputs],
                               "raised": 0, "first_error": None})
             cols = list(slots.keys())
@@ -11314,7 +11329,7 @@ class Store:
             for other in inputs[1:]:
                 if self._find_column(src, other) is None:
                     raise KeyError(other)
-            state: dict = {"inputs": list(inputs)}   # see backfill_derived_columns
+            state = self._multi_input_state(src, inputs)   # see backfill_derived_columns
             if op.get("prepare"):
                 op["prepare"](self, params, state)
             sel = ", ".join(self._col_ref(src, c) for c in inputs)
@@ -11360,19 +11375,24 @@ class Store:
         members = [m for m in self._resolve_members(merge_id)
                    if any(self._find_column(m["src"], c) is not None for c in inputs)]
         per = max(1, limit // max(1, len(members)))
-        state: dict = {"inputs": list(inputs)}   # see backfill_derived_columns
+        # One prepare, then each member's own input types on top of it
+        # (_multi_input_state), as each member's backfill will have them.
+        prepared: dict = {"inputs": list(inputs)}
         if op.get("prepare"):
-            op["prepare"](self, params, state)
+            op["prepare"](self, params, prepared)
         rows: list = []
+        preview: list = []
         with self._reader() as ro:
             for m in members:
                 msrc = m["src"]
+                state = {**prepared, **self._multi_input_state(msrc, inputs)}
                 sel = ", ".join(self._input_ref(msrc, c) for c in inputs)
-                rows.extend(ro.execute(
+                got = ro.execute(
                     f"SELECT {sel} FROM {self._from_clause(msrc)} ORDER BY rid LIMIT ?", (per,),
-                ).fetchall())
-        preview = [{"input": r[0], "output": timeparse.parse_multi_or_none(op, list(r), params, state)}
-                   for r in rows]
+                ).fetchall()
+                rows.extend(got)
+                preview.extend({"input": r[0], "output": timeparse.parse_multi_or_none(op, list(r), params, state)}
+                               for r in got)
         failures = sum(1 for r, p in zip(rows, preview)
                        if p["output"] is None and any(v is not None and str(v).strip() for v in r))
         return {"preview": preview, "sampled": len(preview), "failures": failures, "scope": "table"}
