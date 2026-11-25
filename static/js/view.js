@@ -248,16 +248,65 @@ export function writeStatsLine(v, { cached = false } = {}) {
    `cursorOnly`, for a rebuild that isn't going to move the viewport and
    only wants to keep the cursor honest. Null under a grouping (grouped
    positions are another address space, and regroupAll clears the cursor)
-   and null once the row's page has left the cache. */
+   and null once the row's page has left the cache — runBuild asks the
+   server for that one (anchorKeyAt). */
 export function cursorRowAnchor({ cursorOnly = false } = {}) {
-  if (S.groupByCols.length) return null;
-  let pos = -1;
-  if (S.cursor >= 0) pos = S.cursor;
-  else if (cursorOnly) return null;
-  else if (selCount()) pos = selFirst();
-  else if (S.cellRange) pos = S.cellRange.r0;
+  const pos = cursorRowPos({ cursorOnly });
   const r = pos >= 0 ? rowAt(pos) : null;
   return r ? { source_id: r.source_id, rid: r.rid } : null;
+}
+
+/* The position cursorRowAnchor names, cached or not: -1 for none. */
+function cursorRowPos({ cursorOnly = false } = {}) {
+  if (S.groupByCols.length) return -1;
+  if (S.cursor >= 0) return S.cursor;
+  if (cursorOnly) return -1;
+  if (selCount()) return selFirst();
+  if (S.cellRange) return S.cellRange.r0;
+  return -1;
+}
+
+/* The row at `pos` of view `v`, by identity, asked of the server: for a
+   cursor whose page is not in the cache. That happens to an ordinary
+   place, not an exotic one — the page cache keeps ten pages, so a cursor
+   set and then scrolled a long way from on a big table has gone from it,
+   and so has one set by a jump that the paint has not fetched rows for
+   yet. Without the identity the rebuild had nothing to land on and went
+   to the top, clearing the cursor. One position in a view that still
+   exists (the build that replaces it has not been posted yet): a lookup
+   by key, cheap on every kind of view. Null when it can't say. */
+async function anchorKeyAt(v, pos) {
+  try {
+    const { keys } = await post('/api/view/keys', { view_id: v.view_id, positions: [pos] });
+    return keys && keys.length ? { source_id: keys[0][0], rid: keys[0][1] } : null;
+  } catch { return null; }
+}
+
+/* The spec the view on screen for this table was built from, or null
+   when that isn't known (a view installed under another key). Not
+   currentSpec(): the two differ for exactly as long as a change is
+   waiting to be built, which is when runBuild asks. */
+function shownSpec() {
+  const cached = S.viewCache.get(S.sourceId);
+  if (!cached || !S.view || S.view.source_id !== S.sourceId || cached.view_id !== S.view.view_id) return null;
+  try { return JSON.parse(cached.key); } catch { return null; }
+}
+
+/* Whether going from `shown` to `next` takes away something that was
+   hiding rows: a column's filter, the filter builder's tree, a tag in the
+   tag filter, the timeframe or the search. Removed, not edited — a box
+   whose text changed still filters, and typing keeps its scroll offset
+   (runBuild). */
+function dropsNarrowing(shown, next) {
+  if (!shown) return false;
+  const columns = new Set((next.filters || []).map((f) => f.column));
+  if ((shown.filters || []).some((f) => !columns.has(f.column))) return true;
+  if (shown.filter_tree && !next.filter_tree) return true;
+  const tags = new Set((next.tags || []).map((t) => JSON.stringify(t)));
+  if ((shown.tags || []).some((t) => !tags.has(JSON.stringify(t)))) return true;
+  const bounded = (r) => !!(r && r.enabled && (r.start || r.end));
+  if (bounded(shown.time_range) && !bounded(next.time_range)) return true;
+  return !!specSearchTerm(shown) && !specSearchTerm(next);
 }
 
 /* Where `anchor` sits in the view just built: a position; null when the
@@ -628,6 +677,19 @@ export async function applyPendingView(sourceId = S.sourceId) {
    which is the point of there being one of these. */
 async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = null, fetchView = null } = {}) {
   if (!S.sourceId) return;
+  const spec = currentSpec();
+  // A filter taken away lands on the row, whichever gesture took it: a
+  // header box emptied or Escaped, a chip's ✕, an undo, the search box
+  // cleared. Those rebuild with the default keepScroll, which is right
+  // for typing — the viewport holds still while a filter is being written
+  // — and wrong for the moment one is dropped. The view behind it grows,
+  // so the old offset names some other stretch of the table, usually the
+  // top of it (a narrow filter's rows fit on one screen at scrollTop 0),
+  // and the row the analyst was on was somewhere below, with the cursor
+  // either left as a number naming a stranger or, pane open, re-pointed
+  // off screen. "Clear filters" always found the row, so the same act
+  // landed in two places depending on which control did it.
+  if (keepScroll && keepRow && dropsNarrowing(shownSpec(), spec)) keepScroll = false;
   // Captured in virtual (row-space) pixels rather than as a raw scrollTop:
   // the outgoing and incoming views can have different row counts, and once
   // either is over MAX_SPACER_PX they have different spacer scales too — the
@@ -645,8 +707,13 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
   // open. Pane closed, nothing is captured and the cursor keeps its number,
   // which is what the header box always did — the highlight stays at its
   // screen spot — and typing pays for no lookup (see the one below).
-  const anchor = keepRow && (!keepScroll || !$('detail').hidden) ? cursorRowAnchor({ cursorOnly: keepScroll }) : null;
-  const spec = currentSpec();
+  // A row whose page has left the cache is asked for by position, while
+  // the view that position belongs to is still there to answer: awaited
+  // with the picks' lookup below, before this build is posted.
+  const anchorAt = keepRow && (!keepScroll || !$('detail').hidden) ? cursorRowPos({ cursorOnly: keepScroll }) : -1;
+  let anchor = anchorAt >= 0 ? cursorRowAnchor({ cursorOnly: keepScroll }) : null;
+  const anchorP = anchorAt >= 0 && !anchor && S.view && S.view.source_id === S.sourceId
+    ? anchorKeyAt(S.view, anchorAt) : null;
   // Before anything is sent, so a build that is superseded, cancelled or
   // refused still counts as the change the analyst made (see filterundo.js).
   recordFilterState(S.sourceId);
@@ -716,6 +783,7 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
       keys = (await post('/api/view/keys', { view_id: S.view.view_id, positions: selPositions() })).keys;
     } catch { keys = null; }
   }
+  if (anchorP) anchor = await anchorP;
   // Superseded during that lookup: the newer rebuild has already cancelled
   // this one's token and aborted its controller, and none of this one's
   // chrome — busy bar, indicator — has started, so there is nothing else
@@ -942,13 +1010,13 @@ export async function installView(v, { seq, forSourceId, cacheKey, seeded = null
   // highlight on a stranger. A lookup that failed (undefined) is neither
   // answer; the row may well still be here, so the cursor is left as it
   // was for the next rebuild to resolve. Where no row was captured, only a
-  // landing at the top with a cursor still set is acted on: its page had
-  // left the cache (trimPageCache, once the analyst scrolled far from it)
-  // and the number would name a stranger at the top of the new view. A
-  // keepScroll rebuild that captured nothing — pane closed, or that page
-  // gone — touches nothing: the viewport didn't move, and the highlight
-  // stays where it was. Untouched under a grouping (regroupAll owns the
-  // cursor there) and for keepRow:false.
+  // landing at the top with a cursor still set is acted on: the row could
+  // not be named — its page had left the cache and the server could not
+  // be asked either (anchorKeyAt) — and the number would name a stranger
+  // at the top of the new view. A keepScroll rebuild that captured
+  // nothing — pane closed — touches nothing: the viewport didn't move,
+  // and the highlight stays where it was. Untouched under a grouping
+  // (regroupAll owns the cursor there) and for keepRow:false.
   if (keepRow && !S.groupByCols.length) {
     const drop = () => { S.cursor = -1; $('detail').hidden = true; $('detailResize').hidden = true; };
     if (anchored) {
