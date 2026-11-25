@@ -144,7 +144,7 @@ def test_a_gzipped_tarball_is_an_archive_however_it_is_named(tmp_path):
 
 def test_a_gzipped_file_is_decided_by_its_bytes_not_its_name(tmp_path):
     plain = tmp_path / "not-really.csv.gz"
-    plain.write_text("a,b\n1,2\n")
+    plain.write_bytes(b"a,b\n1,2\n")
     assert gzipped.is_gzip(str(plain)) is False
     # Read as it is: nothing decompresses it, and nothing fails.
     assert gzipped.head(str(plain), 1 << 20) == b"a,b\n1,2\n"
@@ -304,7 +304,7 @@ def test_the_fingerprint_is_the_one_the_uncompressed_file_has(store, tmp_path):
     by the colleague who had events.json."""
     body = json.dumps([{"a": 1}, {"a": 2}])
     plain = tmp_path / "events.json"
-    plain.write_text(body)
+    plain.write_bytes(body.encode())
     compressed = gz(tmp_path, "events.json.gz", body)
     assert store.ingest_json(str(plain))["file_hash"] == store.ingest_json(compressed)["file_hash"]
 
